@@ -9,10 +9,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from bank_parser import parse_bank_file, parse_debit_file, extract_comment_text
+from bank_parser import parse_bank_file
 from tenant_loader import load_tenants
 from matcher import match_transactions, FUZZY_THRESHOLD
-from excel_updater import apply_matches, apply_expense_matches, LedgerUpdater, ExpenseUpdater
+from excel_updater import apply_matches, LedgerUpdater
 
 st.set_page_config(
     page_title="האגמית 7 – גביה",
@@ -31,13 +31,12 @@ st.markdown("""
 
 st.title("🏢 האגמית 7 – התאמת תשלומים")
 
-for key in ("matched","unmatched","tenants","ledger_path","payment_month","written","skipped",
-            "debits_matched","debits_unmatched","expense_written","expense_skipped"):
+for key in ("matched","unmatched","tenants","ledger_path","payment_month","written","skipped"):
     if key not in st.session_state:
         st.session_state[key] = None
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "⚙️ הרצה", "✅ התאמות אוטומטיות", "🔍 בדיקה ידנית", "💸 הוצאות", "📋 יומן כתיבה"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "⚙️ הרצה", "✅ התאמות אוטומטיות", "🔍 בדיקה ידנית", "📋 יומן כתיבה"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,19 +106,6 @@ with tab1:
                 except Exception as e:
                     st.error(f"שגיאה בניתוח קובץ בנק: {e}"); st.stop()
 
-            with st.spinner("מנתח הוצאות מהבנק…"):
-                try:
-                    # Resolve categories.csv next to app.py — never rely on cwd
-                    cats_path = Path(__file__).parent / "categories.csv"
-                    if not cats_path.exists():
-                        st.error("לא נמצא קובץ categories.csv בתיקיית האפליקציה"); st.stop()
-                    all_debits = parse_debit_file(str(bank_path), str(cats_path))
-                    debits_matched   = [d for d in all_debits if d["match_method"] == "keyword"]
-                    debits_unmatched = [d for d in all_debits if d["match_method"] == "unmatched"]
-                except Exception as e:
-                    st.warning(f"אזהרה: לא ניתן לנתח הוצאות: {e}")
-                    debits_matched, debits_unmatched = [], []
-
             with st.spinner("טוען רשימת דיירים…"):
                 try:
                     tenants = load_tenants(str(roster_path))
@@ -135,34 +121,21 @@ with tab1:
                 written, skipped = apply_matches(
                     matched, str(ledger_path), month_input, overwrite=overwrite
                 )
-                try:
-                    expense_written, expense_skipped = apply_expense_matches(
-                        debits_matched, str(ledger_path), month_input, overwrite=overwrite
-                    )
-                except Exception as e:
-                    st.warning(f"אזהרה: שגיאה בכתיבת הוצאות: {e}")
-                    expense_written, expense_skipped = [], []
 
-            st.session_state.matched          = matched
-            st.session_state.unmatched        = unmatched
-            st.session_state.tenants          = tenants
-            st.session_state.ledger_path      = str(ledger_path)
-            st.session_state.payment_month    = month_input
-            st.session_state.written          = written
-            st.session_state.skipped          = skipped
-            st.session_state.debits_matched   = debits_matched
-            st.session_state.debits_unmatched = debits_unmatched
-            st.session_state.expense_written  = expense_written
-            st.session_state.expense_skipped  = expense_skipped
+            st.session_state.matched       = matched
+            st.session_state.unmatched     = unmatched
+            st.session_state.tenants       = tenants
+            st.session_state.ledger_path   = str(ledger_path)
+            st.session_state.payment_month = month_input
+            st.session_state.written       = written
+            st.session_state.skipped       = skipped
 
             # Summary metrics
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            c1.metric("תנועות סה״כ",      len(transactions))
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("תנועות סה״כ",    len(transactions))
             c2.metric("התאמות אוטומטיות", len(matched))
-            c3.metric("לבדיקה ידנית",     len(unmatched))
-            c4.metric("נכתבו לגיליון",    len(written))
-            c5.metric("הוצאות שהותאמו",   len(debits_matched))
-            c6.metric("הוצאות לבדיקה",    len(debits_unmatched))
+            c3.metric("לבדיקה ידנית",   len(unmatched))
+            c4.metric("נכתבו לגיליון",  len(written))
 
             with open(str(ledger_path), "rb") as f:
                 st.download_button(
@@ -282,168 +255,9 @@ with tab3:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 – Expenses (הוצאות)
+# TAB 4 – Written log
 # ══════════════════════════════════════════════════════════════════════════════
 with tab4:
-    st.subheader("הוצאות – ניתוח חיובים")
-
-    if st.session_state.debits_matched is None:
-        st.info("הרץ תהליך התאמה כדי לראות הוצאות")
-    else:
-        debits_matched   = st.session_state.debits_matched   or []
-        debits_unmatched = st.session_state.debits_unmatched or []
-        overwrite_exp    = st.checkbox("דרוס ערכים קיימים בהוצאות", value=False, key="overwrite_exp")
-
-        # ── Auto-matched section ──────────────────────────────────────────────
-        st.markdown("### ✅ הוצאות שהותאמו אוטומטית")
-        if not debits_matched:
-            st.info("לא נמצאו הוצאות מוכרות בקובץ הבנק")
-        else:
-            # Group by category and sum
-            from collections import defaultdict
-            grouped: dict[str, float] = defaultdict(float)
-            group_rows: dict[str, list] = defaultdict(list)
-            for d in debits_matched:
-                grouped[d["category"]] += d["amount"]
-                group_rows[d["category"]].append(d)
-
-            rows = []
-            for cat, total in grouped.items():
-                txs = group_rows[cat]
-                rows.append({
-                    "קטגוריה":       cat,
-                    "סכום כולל (₪)": f"{total:,.2f}",
-                    "מס׳ תנועות":    len(txs),
-                    "תאריכים":       ", ".join(t["date"] for t in txs),
-                    "גורם":          txs[0].get("entity_name","—"),
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-            exp_written = st.session_state.expense_written or []
-            exp_skipped = st.session_state.expense_skipped or []
-            ca, cb = st.columns(2)
-            ca.metric("נכתבו", len(exp_written))
-            cb.metric("דולגו (קיים)",  len(exp_skipped))
-
-            if exp_skipped:
-                with st.expander("⚠️ הוצאות שדולגו (תא כבר מכיל ערך)"):
-                    st.dataframe(pd.DataFrame([{
-                        "קטגוריה": e["category"],
-                        "סכום":    e["amount"],
-                        "סיבה":    e["write_message"],
-                    } for e in exp_skipped]), use_container_width=True)
-
-            if st.button("🔄 כתוב הוצאות מותאמות לגיליון", use_container_width=True, key="write_exp_auto"):
-                if not st.session_state.ledger_path:
-                    st.error("אין גיליון פתוח")
-                else:
-                    try:
-                        ew, es = apply_expense_matches(
-                            debits_matched,
-                            st.session_state.ledger_path,
-                            st.session_state.payment_month,
-                            overwrite=overwrite_exp,
-                        )
-                        st.session_state.expense_written = ew
-                        st.session_state.expense_skipped = es
-                        st.success(f"נכתבו {len(ew)} | דולגו {len(es)}")
-                        with open(st.session_state.ledger_path, "rb") as f:
-                            st.download_button(
-                                "⬇️ הורד גיליון מעודכן",
-                                f.read(),
-                                file_name="האגמית7_כספים_מעודכן_הוצאות.xlsx",
-                                key="dl_exp_auto"
-                            )
-                    except Exception as e:
-                        st.error(f"שגיאה בכתיבה: {e}")
-
-        st.divider()
-
-        # ── Manual review section ─────────────────────────────────────────────
-        st.markdown("### 🔍 הוצאות לשיוך ידני")
-        if not debits_unmatched:
-            st.success("🎉 כל ההוצאות שויכו אוטומטית!")
-        else:
-            # Build category options from the live expense sheet if available
-            if st.session_state.ledger_path:
-                try:
-                    eu = ExpenseUpdater(st.session_state.ledger_path)
-                    cat_options = eu.available_categories
-                except Exception:
-                    cat_options = []
-            else:
-                cat_options = []
-
-            st.caption(f"{len(debits_unmatched)} הוצאות ממתינות לשיוך")
-            for idx, d in enumerate(debits_unmatched):
-                label = d.get("description") or d["ref"]
-                with st.expander(
-                    f"📌 {d['date']}  |  ₪{d['amount']:.2f}  |  {label}", expanded=True
-                ):
-                    col_l, col_r = st.columns([2, 1])
-                    with col_l:
-                        st.write("**תיאור:**",        d.get("description") or "—")
-                        st.write("**תאור מורחב:**",   d.get("raw_detail")  or "—")
-                    with col_r:
-                        chosen_cat = st.selectbox(
-                            "שייך לקטגוריה",
-                            ["— לא לשייך —"] + (cat_options or ["(טען גיליון)"]),
-                            key=f"exp_sel_{idx}"
-                        )
-                        amt = st.number_input(
-                            "סכום (₪)", value=float(d["amount"]), key=f"exp_amt_{idx}"
-                        )
-                        btn_col1, btn_col2 = st.columns(2)
-                        _write_clicked = btn_col1.button("✏️ כתוב לגיליון", key=f"exp_write_{idx}", use_container_width=True)
-                        _add_clicked   = btn_col2.button("➕ הוסף לסכום",   key=f"exp_add_{idx}",   use_container_width=True)
-
-                        def _guard(chosen, ledger):
-                            if chosen == "— לא לשייך —":
-                                st.warning("נא לבחור קטגוריה"); return False
-                            if not ledger:
-                                st.error("אין גיליון פתוח"); return False
-                            return True
-
-                        if _write_clicked or _add_clicked:
-                            if _guard(chosen_cat, st.session_state.ledger_path):
-                                eu2 = ExpenseUpdater(st.session_state.ledger_path)
-                                if _write_clicked:
-                                    ok, msg = eu2.write_expense(
-                                        chosen_cat,
-                                        st.session_state.payment_month,
-                                        amt,
-                                        overwrite=overwrite_exp,
-                                    )
-                                else:
-                                    ok, msg = eu2.add_to_expense(
-                                        chosen_cat,
-                                        st.session_state.payment_month,
-                                        amt,
-                                    )
-                                # If category is כללי, also write comment from raw_detail
-                                if ok and chosen_cat == "כללי":
-                                    comment_text = extract_comment_text(d.get("raw_detail", ""))
-                                    if comment_text:
-                                        c_ok, c_msg = eu2.write_comment(
-                                            st.session_state.payment_month, comment_text
-                                        )
-                                        msg += f"\n{'✓' if c_ok else '⚠️'} הערה: {c_msg}"
-                                eu2.save()
-                                (st.success if ok else st.error)(msg)
-                                if ok:
-                                    with open(st.session_state.ledger_path, "rb") as f:
-                                        st.download_button(
-                                            "⬇️ הורד גיליון מעודכן",
-                                            f.read(),
-                                            file_name="האגמית7_כספים_מעודכן.xlsx",
-                                            key=f"dl_exp_{idx}"
-                                        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 – Written log
-# ══════════════════════════════════════════════════════════════════════════════
-with tab5:
     st.subheader("יומן כתיבה")
 
     if st.session_state.written is None:
