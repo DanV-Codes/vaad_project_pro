@@ -78,6 +78,56 @@ def _is_formula(cell) -> bool:
     return isinstance(cell.value, str) and cell.value.startswith("=")
 
 
+
+class LedgerReader:
+    """
+    Lightweight, read-only snapshot of the גביה 2026 sheet.
+    No backup, no modification — safe to instantiate on every render.
+    """
+    def __init__(self, ledger_path: str):
+        wb = openpyxl.load_workbook(str(ledger_path), data_only=True)
+        if SHEET_NAME not in wb.sheetnames:
+            wb.close()
+            raise ValueError(f"Sheet \'{SHEET_NAME}\' not found")
+        ws = wb[SHEET_NAME]
+
+        # Month column map
+        self._month_col: dict[str, int] = {}
+        for cell in ws[HEADER_ROW]:
+            mm = _month_to_mm(cell.value)
+            if mm:
+                self._month_col[mm] = cell.column
+
+        # Apartment → row map  +  cache all relevant cell values
+        self._apt_row: dict[int, int] = {}
+        self._vals:    dict[tuple, object] = {}
+        for row_idx in range(FIRST_DATA_ROW, LAST_DATA_ROW + 1):
+            apt_val = ws.cell(row=row_idx, column=APT_COL).value
+            try:
+                self._apt_row[int(apt_val)] = row_idx
+            except (TypeError, ValueError):
+                pass
+            for col_idx in list(self._month_col.values()) + [PETTY_CASH_COL]:
+                self._vals[(row_idx, col_idx)] = ws.cell(row=row_idx, column=col_idx).value
+        wb.close()
+
+    def read_payment(self, apartment: int, month: str):
+        """Return current cell value for (apartment, month), or None."""
+        mm  = _month_to_mm(month)
+        row = self._apt_row.get(int(apartment))
+        col = self._month_col.get(mm) if mm else None
+        if row is None or col is None:
+            return None
+        return self._vals.get((row, col))
+
+    def read_petty(self, apartment: int):
+        """Return current קופה קטנה cell value for apartment, or None."""
+        row = self._apt_row.get(int(apartment))
+        if row is None:
+            return None
+        return self._vals.get((row, PETTY_CASH_COL))
+
+
 class LedgerUpdater:
     def __init__(self, ledger_path: str):
         self.path = Path(ledger_path)
@@ -176,7 +226,8 @@ class LedgerUpdater:
         )
 
     def write_payment(
-        self, apartment: int, month: str, amount: float, overwrite: bool = False
+        self, apartment: int, month: str, amount: float,
+        overwrite: bool = False, mode: str = "write"
     ) -> tuple[bool, str]:
         """
         Write amount to the cell for (apartment, month).
@@ -199,16 +250,71 @@ class LedgerUpdater:
         if _is_formula(cell):
             return False, f"{cell.coordinate}: formula — skipped"
 
+        col_letter = get_column_letter(col)
+
+        if mode == "add":
+            try:
+                existing = float(cell.value) if cell.value not in (None, "", 0) else 0.0
+            except (TypeError, ValueError):
+                existing = 0.0
+            new_total = existing + amount
+            cell.value = new_total
+            return True, (
+                f"✓ {col_letter}{row}  דירה {apartment}  "
+                f"₪{existing:.2f} + ₪{amount:.2f} = ₪{new_total:.2f}"
+            )
+
+        # mode == "write"  (default)
         existing = cell.value
         if existing not in (None, "", 0) and not overwrite:
             return False, (
                 f"{cell.coordinate}: already has {existing} — "
                 f"skipped (pass overwrite=True to replace)"
             )
-
         cell.value = amount
-        col_letter = get_column_letter(col)
-        return True, f"✓ {col_letter}{row}  apt {apartment}  ₪{amount:.2f}"
+        return True, f"✓ {col_letter}{row}  דירה {apartment}  ₪{amount:.2f}"
+
+    def write_petty_cash(
+        self,
+        apartment: int,
+        amount: float,
+        mode: str = "write",
+    ) -> tuple[bool, str]:
+        """
+        Write or add to the קופה קטנה cell (col Q) for the given apartment.
+        mode="write" : replace (skip if already has value).
+        mode="add"   : add on top of existing value.
+        """
+        row = self._apt_row.get(int(apartment))
+        if row is None:
+            return False, f"Apt {apartment} not found in ledger"
+        if row > LAST_DATA_ROW:
+            return False, f"Row {row} is in the formula section — refused"
+
+        cell = self.ws.cell(row=row, column=PETTY_CASH_COL)
+        if _is_formula(cell):
+            return False, f"{cell.coordinate}: formula — skipped"
+
+        col_letter = get_column_letter(PETTY_CASH_COL)
+
+        if mode == "add":
+            try:
+                existing = float(cell.value) if cell.value not in (None, "", 0) else 0.0
+            except (TypeError, ValueError):
+                existing = 0.0
+            new_total = existing + amount
+            cell.value = new_total
+            return True, (
+                f"✓ {col_letter}{row}  דירה {apartment}  קופה קטנה  "
+                f"₪{existing:.2f} + ₪{amount:.2f} = ₪{new_total:.2f}"
+            )
+
+        # mode == "write"
+        existing = cell.value
+        if existing not in (None, "", 0):
+            return False, f"{cell.coordinate}: already has {existing} — skipped"
+        cell.value = amount
+        return True, f"✓ {col_letter}{row}  דירה {apartment}  קופה קטנה  ₪{amount:.2f}"
 
     def save(self, output_path: str | None = None) -> str:
         out = Path(output_path) if output_path else self.path
@@ -244,9 +350,14 @@ def apply_matches(
             skipped.append({**result, "write_message": "no tenant resolved"})
             continue
 
-        amount  = result["transaction"]["amount"]
+        if result.get("needs_manual"):
+            skipped.append({**result, "write_message": "סכום שונה מהצפוי – הועבר לבדיקה ידנית"})
+            continue
+
+        amount    = result["transaction"]["amount"]
+        tx_month  = result["transaction"].get("payment_month") or payment_month
         success, msg = updater.write_payment(
-            tenant["apartment"], payment_month, amount, overwrite=overwrite
+            tenant["apartment"], tx_month, amount, overwrite=overwrite
         )
         entry = {**result, "write_message": msg}
         (written if success else skipped).append(entry)
@@ -270,6 +381,10 @@ EXPENSE_LAST_DATA   = 14   # last expense row (rows 15+ must not be touched)
 # Columns N and O (14, 15) are totals/averages – never written
 EXPENSE_PROTECTED_COLS = {14, 15}   # N = 14, O = 15
 EXPENSE_COMMENT_ROW = 23             # free-text comment row per month
+
+# ── Petty cash (קופה קטנה) ────────────────────────────────────────────────────
+PETTY_CASH_COL     = 17   # column Q  (גביה 2026, same row range as payments)
+PETTY_CASH_DEFAULT = 500  # expected full annual petty-cash contribution per apt
 
 
 class ExpenseUpdater:

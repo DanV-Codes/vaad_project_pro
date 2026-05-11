@@ -26,6 +26,22 @@ _RE_APT      = re.compile(r"דירה\s+(\d+)", re.UNICODE)
 _RE_CHECKIN  = re.compile(r"הפקדת שיק", re.UNICODE)   # cheque deposits – keep
 
 
+def _extract_payment_month(date_str: str) -> str | None:
+    """
+    Convert a bank date string "DD/MM/YYYY" to a payment month "MM/YYYY".
+    Returns None if unparseable.
+    """
+    if not isinstance(date_str, str):
+        return None
+    parts = date_str.strip().split("/")
+    if len(parts) == 3:
+        try:
+            return f"{int(parts[1]):02d}/{parts[2]}"
+        except ValueError:
+            pass
+    return None
+
+
 def extract_comment_text(raw_detail: str) -> str:
     """
     Return the meaningful part of a bank raw_detail for use as a comment.
@@ -160,14 +176,16 @@ def parse_bank_file(path: str) -> list[dict]:
         sender_name  = _extract_sender(raw_detail)
         apt_hint     = _extract_apt_hint(raw_detail)
 
+        date_s = str(row.get("date", "")).strip()
         transactions.append({
-            "date":        str(row.get("date", "")).strip(),
-            "ref":         str(row.get("ref", "")).strip(),
-            "description": str(row.get("description", "")).strip(),
-            "amount":      amount,
-            "raw_detail":  raw_detail,
-            "sender_name": sender_name,
-            "apt_hint":    apt_hint,
+            "date":          date_s,
+            "ref":           str(row.get("ref", "")).strip(),
+            "description":   str(row.get("description", "")).strip(),
+            "amount":        amount,
+            "raw_detail":    raw_detail,
+            "sender_name":   sender_name,
+            "apt_hint":      apt_hint,
+            "payment_month": _extract_payment_month(date_s),
         })
 
     return transactions
@@ -284,15 +302,17 @@ def parse_debit_file(path: str, categories_csv: str = "categories.csv") -> list[
 
         category, entity_name = _match_category(desc, ext_desc, rules)
 
+        ddate_s = str(row.get("date", "")).strip()
         debits.append({
-            "date":        str(row.get("date", "")).strip(),
-            "ref":         str(row.get("ref",  "")).strip(),
-            "description": desc,
-            "amount":      amount,
-            "raw_detail":  ext_desc,
-            "category":    category,
-            "entity_name": entity_name,
-            "match_method": "keyword" if category else "unmatched",
+            "date":          ddate_s,
+            "ref":           str(row.get("ref",  "")).strip(),
+            "description":   desc,
+            "amount":        amount,
+            "raw_detail":    ext_desc,
+            "category":      category,
+            "entity_name":   entity_name,
+            "match_method":  "keyword" if category else "unmatched",
+            "payment_month": _extract_payment_month(ddate_s),
         })
 
     return debits

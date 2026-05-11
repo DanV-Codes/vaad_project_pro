@@ -55,6 +55,24 @@ def _best_fuzzy(sender_name, tenants):
     return best_tenant, confidence, detail
 
 
+
+def _flag_mismatch(result: dict) -> None:
+    """
+    Sets result["amount_mismatch"] = True and result["needs_manual"] = True
+    when the paid amount differs from the tenant's expected monthly_fee.
+    Only flags when monthly_fee is set (> 0).
+    """
+    tenant = result.get("tenant") or {}
+    expected = tenant.get("monthly_fee", 0)
+    paid     = result["transaction"].get("amount", 0)
+    if expected > 0 and paid != expected:
+        result["amount_mismatch"] = True
+        result["needs_manual"]    = True
+    else:
+        result["amount_mismatch"] = False
+        result["needs_manual"]    = False
+
+
 def match_transactions(transactions, tenants, fuzzy_threshold=FUZZY_THRESHOLD):
     """
     Returns (matched, unmatched) lists of result dicts.
@@ -80,6 +98,7 @@ def match_transactions(transactions, tenants, fuzzy_threshold=FUZZY_THRESHOLD):
             result["confidence"]   = 1.0
             result["match_method"] = "apt_hint"
             result["match_detail"] = f"דירה {apt} → {by_apt[apt]['tenant_name']}"
+            _flag_mismatch(result)
             matched.append(result)
             continue
 
@@ -93,6 +112,7 @@ def match_transactions(transactions, tenants, fuzzy_threshold=FUZZY_THRESHOLD):
 
             if confidence >= (fuzzy_threshold / 100.0):
                 result["match_method"] = "fuzzy_name"
+                _flag_mismatch(result)
                 matched.append(result)
             else:
                 result["match_method"] = "unmatched"
