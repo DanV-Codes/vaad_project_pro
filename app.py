@@ -9,10 +9,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from bank_parser import parse_bank_file, parse_debit_file, extract_comment_text
+from bank_parser import parse_bank_file, parse_debit_file, parse_all_rows, extract_comment_text
 from tenant_loader import load_tenants
 from matcher import match_transactions, FUZZY_THRESHOLD
 from excel_updater import (apply_matches, apply_expense_matches,
+                            write_raw_transactions_tab,
                             LedgerUpdater, LedgerReader, ExpenseUpdater,
                             PETTY_CASH_DEFAULT)
 
@@ -26,15 +27,15 @@ st.markdown("""
 <style>
   body, .stApp, .stDataFrame { direction: rtl; }
   thead tr th { text-align: right !important; }
-  /* Fix slider tooltip alignment in RTL */
   div[data-baseweb="slider"] { direction: ltr; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏢 האגמית 7 – התאמת תשלומים")
 
-for key in ("matched","unmatched","tenants","ledger_path","ledger_filename","payment_month","written","skipped",
-            "debits_matched","debits_unmatched","expense_written","expense_skipped"):
+for key in ("matched","unmatched","tenants","ledger_path","ledger_filename","payment_month",
+            "written","skipped","debits_matched","debits_unmatched","expense_written",
+            "expense_skipped","raw_tab_count","raw_tab_name"):
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -47,7 +48,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("קבצי קלט")
-    col1, col2 = st.columns(2) # Changed to 2 columns
+    col1, col2 = st.columns(2)
 
     with col1:
         bank_file = st.file_uploader("קובץ בנק (.xls/.xlsx/.csv)", type=["xls","xlsx","csv"])
@@ -58,9 +59,7 @@ with tab1:
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        # Generates a list: ['01/2026', '02/2026', ..., '12/2026']
         months_2026 = [f"{m:02d}/2026" for m in range(1, 13)]
-        
         _today_mm   = f"{__import__('datetime').date.today().month:02d}/2026"
         _def_idx    = months_2026.index(_today_mm) if _today_mm in months_2026 else 0
         month_input = st.selectbox(
@@ -87,8 +86,8 @@ with tab1:
     run_btn = st.button("▶ הרץ התאמה", type="primary", use_container_width=True)
 
     if run_btn:
-        roster_path = Path("tenants.csv") # Looks in your main folder
-        
+        roster_path = Path("tenants.csv")
+
         errors = []
         if not bank_file:   errors.append("נא להעלות קובץ בנק")
         if not ledger_file: errors.append("נא להעלות גיליון ניהול")
@@ -97,49 +96,58 @@ with tab1:
         if errors:
             for e in errors: st.error(e)
         else:
-            # Bank file → tmp (read-only, discarded after run)
             tmp = Path("tmp/vaad")
             tmp.mkdir(parents=True, exist_ok=True)
             bank_path = tmp / bank_file.name
             bank_path.write_bytes(bank_file.read())
 
-            # Ledger → absolute tmp path so there is never a cwd ambiguity.
-            # OneDrive is only written when the user clicks שמור in tab 5.
-            roster_path  = Path(__file__).parent / "tenants.csv"
-            ledger_path  = tmp.resolve() / "master_ledger.xlsx"
+            roster_path = Path(__file__).parent / "tenants.csv"
+            ledger_path = tmp.resolve() / "master_ledger.xlsx"
             ledger_path.write_bytes(ledger_file.read())
 
-            with st.spinner("מנתח קובץ בנק…"):
+            cats_path = Path(__file__).parent / "categories.csv"
+
+            # ── 1. Parse ALL raw rows (no filtering) ─────────────────────────
+            with st.spinner("קורא את כל שורות הבנק…"):
+                try:
+                    if not cats_path.exists():
+                        st.error("לא נמצא קובץ categories.csv"); st.stop()
+                    all_bank_rows = parse_all_rows(str(bank_path), str(cats_path))
+                except Exception as e:
+                    st.error(f"שגיאה בקריאת שורות גולמיות: {e}"); st.stop()
+
+            # ── 2. Parse income transactions ─────────────────────────────────
+            with st.spinner("מנתח הכנסות מהבנק…"):
                 try:
                     transactions = parse_bank_file(str(bank_path))
                 except Exception as e:
                     st.error(f"שגיאה בניתוח קובץ בנק: {e}"); st.stop()
 
+            # ── 3. Parse expense transactions ─────────────────────────────────
             with st.spinner("מנתח הוצאות מהבנק…"):
                 try:
-                    # Resolve categories.csv next to app.py — never rely on cwd
-                    cats_path = Path(__file__).parent / "categories.csv"
-                    if not cats_path.exists():
-                        st.error("לא נמצא קובץ categories.csv בתיקיית האפליקציה"); st.stop()
-                    all_debits = parse_debit_file(str(bank_path), str(cats_path))
+                    all_debits       = parse_debit_file(str(bank_path), str(cats_path))
                     debits_matched   = [d for d in all_debits if d["match_method"] == "keyword"]
                     debits_unmatched = [d for d in all_debits if d["match_method"] == "unmatched"]
                 except Exception as e:
                     st.warning(f"אזהרה: לא ניתן לנתח הוצאות: {e}")
-                    debits_matched, debits_unmatched = [], []
+                    all_debits, debits_matched, debits_unmatched = [], [], []
 
+            # ── 4. Load tenants ───────────────────────────────────────────────
             with st.spinner("טוען רשימת דיירים…"):
                 try:
                     tenants = load_tenants(str(roster_path))
                 except Exception as e:
                     st.error(f"שגיאה ברשימת דיירים: {e}"); st.stop()
 
+            # ── 5. Match income to tenants ────────────────────────────────────
             with st.spinner("מתאים תנועות…"):
                 matched, unmatched = match_transactions(
                     transactions, tenants, fuzzy_threshold=threshold
                 )
 
-            with st.spinner("כותב לגיליון…"):
+            # ── 6. Write reconciliation data to גביה sheet ───────────────────
+            with st.spinner("כותב לגיליון גביה…"):
                 written, skipped = apply_matches(
                     matched, str(ledger_path), month_input, overwrite=overwrite
                 )
@@ -151,6 +159,23 @@ with tab1:
                     st.warning(f"אזהרה: שגיאה בכתיבת הוצאות: {e}")
                     expense_written, expense_skipped = [], []
 
+            # ── 7. Write raw transactions tab ─────────────────────────────────
+            # Combines ALL bank rows (income + expenses, matched + unmatched +
+            # manual-review + double-payments) into a single audit sheet.
+            with st.spinner("כותב טאב תנועות גולמיות…"):
+                try:
+                    all_match_results = matched + unmatched   # full picture
+                    raw_count, raw_sheet = write_raw_transactions_tab(
+                        all_rows          = all_bank_rows,
+                        all_match_results = all_match_results,
+                        ledger_path       = str(ledger_path),
+                        payment_month     = month_input,
+                    )
+                except Exception as e:
+                    st.warning(f"אזהרה: שגיאה בכתיבת טאב גולמי: {e}")
+                    raw_count, raw_sheet = 0, "—"
+
+            # ── Save state ────────────────────────────────────────────────────
             st.session_state.matched          = matched
             st.session_state.unmatched        = unmatched
             st.session_state.tenants          = tenants
@@ -163,15 +188,21 @@ with tab1:
             st.session_state.debits_unmatched = debits_unmatched
             st.session_state.expense_written  = expense_written
             st.session_state.expense_skipped  = expense_skipped
+            st.session_state.raw_tab_count    = raw_count
+            st.session_state.raw_tab_name     = raw_sheet
 
-            # Summary metrics
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            c1.metric("תנועות סה״כ",      len(transactions))
-            c2.metric("התאמות אוטומטיות", len(matched))
-            c3.metric("לבדיקה ידנית",     len(unmatched))
-            c4.metric("נכתבו לגיליון",    len(written))
-            c5.metric("הוצאות שהותאמו",   len(debits_matched))
-            c6.metric("הוצאות לבדיקה",    len(debits_unmatched))
+            # ── Summary metrics ───────────────────────────────────────────────
+            c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+            c1.metric("שורות גולמיות",       raw_count)
+            c2.metric("תנועות הכנסה",         len(transactions))
+            c3.metric("התאמות אוטומטיות",     len(matched))
+            c4.metric("לבדיקה ידנית",         len(unmatched))
+            c5.metric("נכתבו לגביה",          len(written))
+            c6.metric("הוצאות שהותאמו",       len(debits_matched))
+            c7.metric("הוצאות לבדיקה",        len(debits_unmatched))
+
+            if raw_sheet and raw_sheet != "—":
+                st.success(f"✅ טאב גולמי נוצר: **{raw_sheet}** ({raw_count} שורות)")
 
             with open(str(ledger_path), "rb") as f:
                 st.download_button(
@@ -212,14 +243,13 @@ with tab2:
             })
         df = pd.DataFrame(rows)
 
-        # Colour by method (Dark Mode Friendly)
         def row_colour(row):
             if row["⚠️"] == "✓":
-                return ["background-color:#7a2e00"]*len(row) # Orange-red: amount mismatch
+                return ["background-color:#7a2e00"]*len(row)
             if row["שיטה"] == "apt_hint":
-                return ["background-color:#1e4620"]*len(row) # Deep Green
+                return ["background-color:#1e4620"]*len(row)
             elif row["שיטה"] == "fuzzy_name":
-                return ["background-color:#5c4d04"]*len(row) # Deep Yellow/Olive
+                return ["background-color:#5c4d04"]*len(row)
             return [""]*len(row)
 
         st.dataframe(
@@ -244,7 +274,6 @@ with tab3:
     elif not st.session_state.unmatched:
         st.success("🎉 כל התנועות הותאמו אוטומטית!")
     else:
-        # Combine truly unmatched + matched-but-needs-manual (amount mismatch)
         needs_review = [r for r in (st.session_state.matched or []) if r.get("needs_manual")]
         unmatched    = needs_review + (st.session_state.unmatched or [])
         tenants      = st.session_state.tenants or []
@@ -253,8 +282,6 @@ with tab3:
         }
         st.caption(f"{len(unmatched)} תנועות ממתינות לשיוך")
 
-        # ── Shared helpers for this tab ──────────────────────────────────────
-        # Derive year from the global payment_month fallback (e.g. "04/2026" → "2026")
         _year = "2026"
         if st.session_state.payment_month:
             _parts = str(st.session_state.payment_month).split("/")
@@ -272,7 +299,6 @@ with tab3:
             "09":"ספטמבר","10":"אוקטובר","11":"נובמבר","12":"דצמבר",
         }
 
-        # Open a read-only snapshot once for the whole tab (no backup triggered)
         _ledger_reader = None
         if st.session_state.ledger_path:
             try:
@@ -281,7 +307,6 @@ with tab3:
                 pass
 
         def _cell_status(val, full_amount):
-            """Return (emoji, float_val) for a cell value."""
             try:
                 v = float(val) if val not in (None, "", 0) else 0.0
             except (TypeError, ValueError):
@@ -293,25 +318,22 @@ with tab3:
             else:
                 return f"🟢", v
 
-        # ── Per-transaction cards ─────────────────────────────────────────────
         for idx, r in enumerate(unmatched):
             tx    = r["transaction"]
             label = tx.get("sender_name") or tx["description"]
 
-            # Per-card session state
             if f"alloc_{idx}" not in st.session_state:
                 st.session_state[f"alloc_{idx}"] = 0.0
             if f"target_{idx}" not in st.session_state:
-                st.session_state[f"target_{idx}"] =                     tx.get("payment_month") or st.session_state.payment_month
+                st.session_state[f"target_{idx}"] = \
+                    tx.get("payment_month") or st.session_state.payment_month
 
             with st.expander(
                 f"📌 {tx['date']}  |  ₪{tx['amount']:.2f}  |  {label}",
                 expanded=True
             ):
-                # ── Tenant + remaining ────────────────────────────────────────
                 col_t, col_rem = st.columns([3, 1])
 
-                # Pre-select if system already matched this record
                 _pre = 0
                 if r.get("tenant"):
                     _key = f"דירה {r['tenant']['apartment']:>3} – {r['tenant']['tenant_name']}"
@@ -331,7 +353,6 @@ with tab3:
                                delta=f"-₪{_allocated:.2f}" if _allocated else None,
                                delta_color="inverse")
 
-                # ── Mismatch / bank details ───────────────────────────────────
                 if r.get("amount_mismatch"):
                     _exp = (r.get("tenant") or {}).get("monthly_fee", "?")
                     st.warning(f"⚠️ שולם ₪{tx['amount']:.2f} | צפוי ₪{_exp}")
@@ -342,34 +363,31 @@ with tab3:
                     if r.get("tenant"):
                         st.write("**הצעת מערכת:**", r.get("match_detail", ""))
 
-                # ── Resolve tenant for cell-value lookups ─────────────────────
                 _tenant_obj  = tenant_options.get(chosen) if chosen != "— לא לשייך —" else None
                 _apt         = _tenant_obj["apartment"] if _tenant_obj else None
                 _monthly_fee = (_tenant_obj.get("monthly_fee") or 350) if _tenant_obj else 350
 
-                # ── Month pill grid ───────────────────────────────────────────
                 st.markdown("**בחר חודש יעד:**")
                 _sel = st.session_state[f"target_{idx}"]
 
                 for _row_start in (0, 6):
                     _cols6 = st.columns(6)
                     for _i, _c in enumerate(_cols6):
-                        _mi  = _row_start + _i
-                        _mm  = f"{_mi + 1:02d}"
+                        _mi   = _row_start + _i
+                        _mm   = f"{_mi + 1:02d}"
                         _mstr = f"{_mm}/{_year}"
-                        _raw = (_ledger_reader.read_payment(_apt, _mstr)
-                                if _ledger_reader and _apt else None)
+                        _raw  = (_ledger_reader.read_payment(_apt, _mstr)
+                                 if _ledger_reader and _apt else None)
                         _emoji, _cv = _cell_status(_raw, _monthly_fee)
                         _is_sel = _sel == _mstr
                         _cv_str = f" {_cv:.0f}" if _cv else ""
-                        _lbl = f"{'✓ ' if _is_sel else ''}{HEB_SHORT[_mm]} {_emoji}{_cv_str}"
+                        _lbl    = f"{'✓ ' if _is_sel else ''}{HEB_SHORT[_mm]} {_emoji}{_cv_str}"
                         if _c.button(_lbl, key=f"p_{idx}_{_mm}",
                                      type="primary" if _is_sel else "secondary",
                                      use_container_width=True):
                             st.session_state[f"target_{idx}"] = _mstr
                             st.rerun()
 
-                # קופה קטנה pill
                 _praw       = (_ledger_reader.read_petty(_apt)
                                if _ledger_reader and _apt else None)
                 _pemoji, _pv = _cell_status(_praw, PETTY_CASH_DEFAULT)
@@ -381,22 +399,20 @@ with tab3:
                 if st.button(_plbl, key=f"p_{idx}_petty",
                              type="primary" if _is_psel else "secondary",
                              use_container_width=True):
-                    st.session_state[f"target_{idx}"] = "petty"
+                    st.session_state[f"petty"] = "petty"
                     st.rerun()
 
-                # ── Action row ────────────────────────────────────────────────
                 st.divider()
                 if not _sel:
                     st.info("בחר חודש או קופה קטנה מהרשת למעלה")
                 else:
-                    # Build target label + default amount
                     if _sel == "petty":
                         _target_lbl  = f"קופה קטנה  (נוכחי ₪{_pv:.0f} / ₪{PETTY_CASH_DEFAULT})"
                         _default_amt = tx["amount"]
                     else:
-                        _sel_mm   = _sel.split("/")[0]
-                        _cur_raw  = (_ledger_reader.read_payment(_apt, _sel)
-                                     if _ledger_reader and _apt else None)
+                        _sel_mm  = _sel.split("/")[0]
+                        _cur_raw = (_ledger_reader.read_payment(_apt, _sel)
+                                    if _ledger_reader and _apt else None)
                         try:
                             _cur_v = float(_cur_raw) if _cur_raw not in (None, "", 0) else 0.0
                         except (TypeError, ValueError):
@@ -428,9 +444,7 @@ with tab3:
                             if _sel == "petty":
                                 _ok, _msg = _u.write_petty_cash(_apt, _amt_in, mode="add")
                             else:
-                                _ok, _msg = _u.write_payment(
-                                    _apt, _sel, _amt_in, mode="add"
-                                )
+                                _ok, _msg = _u.write_payment(_apt, _sel, _amt_in, mode="add")
                             _u.save()
                             (st.success if _ok else st.error)(_msg)
                             if _ok:
@@ -439,16 +453,14 @@ with tab3:
                                     st.download_button(
                                         "⬇️ הורד",
                                         _f.read(),
-                                        file_name=(
-                                            st.session_state.ledger_filename or "גיליון.xlsx"
-                                        ),
+                                        file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
                                         key=f"dl_{idx}",
                                     )
                                 st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 – Expenses (הוצאות)
+# TAB 4 – Expenses
 # ══════════════════════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("הוצאות – ניתוח חיובים")
@@ -460,12 +472,10 @@ with tab4:
         debits_unmatched = st.session_state.debits_unmatched or []
         overwrite_exp    = st.checkbox("דרוס ערכים קיימים בהוצאות", value=False, key="overwrite_exp")
 
-        # ── Auto-matched section ──────────────────────────────────────────────
         st.markdown("### ✅ הוצאות שהותאמו אוטומטית")
         if not debits_matched:
             st.info("לא נמצאו הוצאות מוכרות בקובץ הבנק")
         else:
-            # Group by category and sum
             from collections import defaultdict
             grouped: dict[str, float] = defaultdict(float)
             group_rows: dict[str, list] = defaultdict(list)
@@ -489,7 +499,7 @@ with tab4:
             exp_skipped = st.session_state.expense_skipped or []
             ca, cb = st.columns(2)
             ca.metric("נכתבו", len(exp_written))
-            cb.metric("דולגו (קיים)",  len(exp_skipped))
+            cb.metric("דולגו (קיים)", len(exp_skipped))
 
             if exp_skipped:
                 with st.expander("⚠️ הוצאות שדולגו (תא כבר מכיל ערך)"):
@@ -525,12 +535,10 @@ with tab4:
 
         st.divider()
 
-        # ── Manual review section ─────────────────────────────────────────────
         st.markdown("### 🔍 הוצאות לשיוך ידני")
         if not debits_unmatched:
             st.success("🎉 כל ההוצאות שויכו אוטומטית!")
         else:
-            # Build category options from the live expense sheet if available
             if st.session_state.ledger_path:
                 try:
                     eu = ExpenseUpdater(st.session_state.ledger_path)
@@ -548,8 +556,8 @@ with tab4:
                 ):
                     col_l, col_r = st.columns([2, 1])
                     with col_l:
-                        st.write("**תיאור:**",        d.get("description") or "—")
-                        st.write("**תאור מורחב:**",   d.get("raw_detail")  or "—")
+                        st.write("**תיאור:**",       d.get("description") or "—")
+                        st.write("**תאור מורחב:**",  d.get("raw_detail")  or "—")
                     with col_r:
                         chosen_cat = st.selectbox(
                             "שייך לקטגוריה",
@@ -586,7 +594,6 @@ with tab4:
                                         st.session_state.payment_month,
                                         amt,
                                     )
-                                # If category is כללי, also write comment from raw_detail
                                 if ok and chosen_cat == "כללי":
                                     comment_text = extract_comment_text(d.get("raw_detail", ""))
                                     if comment_text:
@@ -617,6 +624,14 @@ with tab5:
     else:
         written = st.session_state.written
         skipped = st.session_state.skipped
+
+        # Raw tab summary
+        if st.session_state.raw_tab_name:
+            st.info(
+                f"📋 טאב גולמי: **{st.session_state.raw_tab_name}** — "
+                f"{st.session_state.raw_tab_count} שורות (כולל ידני, כפול, הוצאות)"
+            )
+
         st.markdown(f"**נכתבו:** {len(written)}  |  **דולגו:** {len(skipped)}")
 
         if written:
@@ -643,7 +658,6 @@ with tab5:
             original_name = st.session_state.ledger_filename or "גיליון.xlsx"
             onedrive_path = Path(r"C:\Users\danie\OneDrive") / original_name
 
-            # Read the edited file fresh on every render — most reliable approach.
             try:
                 with open(st.session_state.ledger_path, "rb") as _fh:
                     file_bytes = _fh.read()
