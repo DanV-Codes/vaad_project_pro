@@ -14,6 +14,7 @@ Each transaction dict:
     "sender_name": "אליזבט בינשטוק",   # extracted from raw_detail, may be truncated
     "apt_hint":    43,                   # int if "דירה XX" found in raw_detail, else None
     "payment_month": "04/2026",          # derived from text first, then transaction date
+    "petty_cash":  False,               # True when memo contains "קופה קטנה"
 }
 """
 
@@ -22,9 +23,11 @@ import pandas as pd
 
 
 # ── Regex patterns ────────────────────────────────────────────────────────────
-_RE_SENDER   = re.compile(r"העברה מאת:\s*(.+?)\s+\d{2}-\d{3}-\d+", re.UNICODE)
-_RE_APT      = re.compile(r"דירה\s+(\d+)", re.UNICODE)
-_RE_CHECKIN  = re.compile(r"הפקדת שיק", re.UNICODE)
+_RE_SENDER       = re.compile(r"העברה מאת:\s*(.+?)\s+\d{2}-\d{3}-\d+", re.UNICODE)
+_RE_APT          = re.compile(r"דירה\s+(\d+)", re.UNICODE)
+# FIX Bug 3: catch reversed "38תשלום קופה..." / "55קופה..." patterns from Bank Leumi
+_RE_APT_REVERSED = re.compile(r"(\d{1,3})\s*(?:תשלום|קופה)", re.UNICODE)
+_RE_CHECKIN      = re.compile(r"הפקדת שיק", re.UNICODE)
 
 # ── Hebrew month map (used for text-based month detection) ────────────────────
 _HEB_MONTHS = {
@@ -42,15 +45,9 @@ def _month_from_text(text: str, year: str) -> str | None:
     Only the text AFTER the bank account number (XX-XXX-XXXXXXXXX) is
     searched, to avoid false-positives from sender names that happen to
     contain a month word (e.g. "ברייב יולי" — יולי = July AND a surname).
-
-    Examples that correctly resolve:
-        "...12-704-000515151 ועד בית אפריל"      → "04/YYYY"
-        "...12-704-000515151 לועד בית חודש מאי"  → "05/YYYY"
-        "...12-701-000404014 ועד בית"             → None  (no month in memo)
     """
     if not isinstance(text, str):
         return None
-    # Only look in the memo/comment part — after the bank account number
     m = re.search(r"\d{2}-\d{3}-\d+", text)
     search_in = text[m.end():].strip() if m else text
     for heb, mm in _HEB_MONTHS.items():
@@ -60,10 +57,7 @@ def _month_from_text(text: str, year: str) -> str | None:
 
 
 def _extract_payment_month(date_str: str) -> str | None:
-    """
-    Convert a bank date string "DD/MM/YYYY" to a payment month "MM/YYYY".
-    Returns None if unparseable.
-    """
+    """Convert a bank date string "DD/MM/YYYY" to a payment month "MM/YYYY"."""
     if not isinstance(date_str, str):
         return None
     parts = date_str.strip().split("/")
@@ -78,9 +72,7 @@ def _extract_payment_month(date_str: str) -> str | None:
 def extract_comment_text(raw_detail: str) -> str:
     """
     Return the meaningful part of a bank raw_detail for use as a comment.
-    Strips everything up to and including the bank account number
-    (pattern: XX-XXX-XXXXXXXXX), then returns the remainder stripped.
-    If no account number is found, returns the full string stripped.
+    Strips everything up to and including the bank account number.
     """
     if not isinstance(raw_detail, str):
         return ""
@@ -103,23 +95,36 @@ def _extract_sender(detail: str) -> str | None:
 
 
 def _extract_apt_hint(detail: str) -> int | None:
-    """Pull apartment number from 'דירה XX' if present."""
+    """
+    Pull apartment number from raw_detail. Handles two Bank Leumi patterns:
+      - Forward:  "דירה 37"              (most common)
+      - Reversed: "38תשלום קופה קטנה דירה"  (Bank Leumi quirk, digits before keyword)
+                  "55קופה קטנה עבור דירה"
+
+    For the reversed pattern, only searches the memo portion (after the
+    bank account number XX-XXX-XXXXXXXXX) to avoid false positives.
+    """
     if not isinstance(detail, str):
         return None
+    # Forward pattern first — most reliable
     m = _RE_APT.search(detail)
-    return int(m.group(1)) if m else None
+    if m:
+        return int(m.group(1))
+    # Reversed pattern: search only after the account number
+    acc = re.search(r"\d{2}-\d{3}-\d+", detail)
+    search_in = detail[acc.end():].strip() if acc else detail
+    m2 = _RE_APT_REVERSED.search(search_in)
+    if m2:
+        n = int(m2.group(1))
+        if 1 <= n <= 60:   # sanity-check: valid apartment range for this building
+            return n
+    return None
 
 
-# ── FIX: _is_incoming now accepts ALL non-outgoing credits ────────────────────
-# Previously required "העברה מאת:" which silently dropped standing-order
-# credits (הוראת קבע) that carry no sender detail in the extended description.
 def _is_incoming(row) -> bool:
     """
     Keep a row if it has a credit (זכות > 0) AND is not an explicit
     outgoing transfer ("העברה אל:").
-
-    Accepts: bank transfers (העברה מאת:), standing orders (הוראת קבע),
-             cheque deposits (הפקדת שיק), and any other credit.
     """
     try:
         credit = float(str(row["בזכות"]).replace(",", "")) if pd.notna(row["בזכות"]) else 0.0
@@ -130,21 +135,15 @@ def _is_incoming(row) -> bool:
         return False
 
     detail = str(row.get("תאור מורחב", ""))
-
-    # Reject only explicit outgoing transfers
     if "העברה אל:" in detail:
         return False
 
-    # Every remaining credit is incoming
     return True
 
 
 def _resolve_payment_month(raw_detail: str, date_str: str) -> str | None:
     """
-    Return the best payment month for a transaction.
-    Priority:
-      1. Hebrew month name found in raw_detail  (e.g. 'אפריל' → '04/2026')
-      2. Month derived from the transaction date
+    Return the best payment month. Hebrew month name in memo takes priority.
     """
     month_from_date = _extract_payment_month(date_str)
     year = month_from_date.split("/")[1] if month_from_date else "2026"
@@ -207,9 +206,10 @@ def parse_bank_file(path: str) -> list[dict]:
         date_s      = str(row.get("date", "")).strip()
         sender_name = _extract_sender(raw_detail)
         apt_hint    = _extract_apt_hint(raw_detail)
-
-        # FIX: use Hebrew month name in text before falling back to transaction date
         payment_month = _resolve_payment_month(raw_detail, date_s)
+
+        # FIX Bug 2: detect petty cash payments by keyword in memo
+        is_petty_cash = "קופה קטנה" in raw_detail
 
         transactions.append({
             "date":          date_s,
@@ -220,6 +220,7 @@ def parse_bank_file(path: str) -> list[dict]:
             "sender_name":   sender_name,
             "apt_hint":      apt_hint,
             "payment_month": payment_month,
+            "petty_cash":    is_petty_cash,   # NEW
         })
 
     return transactions
@@ -228,9 +229,6 @@ def parse_bank_file(path: str) -> list[dict]:
 # ── Debit (expense) parsing ───────────────────────────────────────────────────
 
 def _load_category_rules(csv_path: str = "categories.csv") -> list[dict]:
-    """
-    Load keyword→category mapping from categories.csv.
-    """
     import csv
     from pathlib import Path
 
@@ -267,9 +265,7 @@ def _match_category(desc: str, ext_desc: str, rules: list[dict]) -> tuple[str | 
 
 
 def parse_debit_file(path: str, categories_csv: str = "categories.csv") -> list[dict]:
-    """
-    Parse the same bank file but extract DEBIT (חובה) rows only.
-    """
+    """Parse the same bank file but extract DEBIT (חובה) rows only."""
     rules = _load_category_rules(categories_csv)
 
     tables = pd.read_html(path, encoding="utf-8")
@@ -332,28 +328,10 @@ def parse_debit_file(path: str, categories_csv: str = "categories.csv") -> list[
     return debits
 
 
-# ── NEW: parse_all_rows ───────────────────────────────────────────────────────
-
 def parse_all_rows(path: str, categories_csv: str = "categories.csv") -> list[dict]:
     """
     Return EVERY row from the bank statement without any income/expense
     filtering — credits and debits alike.
-
-    Each dict:
-    {
-        "direction":     "credit" | "debit",
-        "date":          "01/04/2026",
-        "ref":           "99012",
-        "description":   "העברה נכנסת",
-        "amount":        350.0,
-        "raw_detail":    "...",
-        "sender_name":   "גואטה מררו אורית"  | None,
-        "apt_hint":      37                   | None,
-        "payment_month": "04/2026",           # text-override applied for credits
-        "category":      "גינון"             | None,  # debits only
-        "entity_name":   "חלבי כרמי"         | None,  # debits only
-    }
-    Rows where both credit and debit are zero (header/footer artefacts) are skipped.
     """
     rules = _load_category_rules(categories_csv)
 
@@ -437,7 +415,6 @@ def parse_all_rows(path: str, categories_csv: str = "categories.csv") -> list[di
     return rows
 
 
-# ── Quick smoke-test ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys, json
     path = sys.argv[1] if len(sys.argv) > 1 else "תנועות_בחשבון_1_5_2026.xls"

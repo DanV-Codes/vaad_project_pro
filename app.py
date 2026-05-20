@@ -271,197 +271,206 @@ with tab3:
 
     if st.session_state.unmatched is None:
         st.info("הרץ תהליך התאמה כדי לראות תוצאות")
-    elif not st.session_state.unmatched:
-        st.success("🎉 כל התנועות הותאמו אוטומטית!")
     else:
+        # FIX: compute needs_review BEFORE the empty check.
+        # needs_manual items live in `matched`, not `unmatched`.
+        # The old code checked `not st.session_state.unmatched` first, which
+        # fired the green "all matched!" banner and skipped the entire body
+        # whenever unmatched=[] — even when matched contained needs_manual items.
         needs_review = [r for r in (st.session_state.matched or []) if r.get("needs_manual")]
         unmatched    = needs_review + (st.session_state.unmatched or [])
-        tenants      = st.session_state.tenants or []
-        tenant_options = {
-            f"דירה {t['apartment']:>3} – {t['tenant_name']}": t for t in tenants
-        }
-        st.caption(f"{len(unmatched)} תנועות ממתינות לשיוך")
+        if not unmatched:
+            st.success("🎉 כל התנועות הותאמו אוטומטית!")
+        else:
+            tenants      = st.session_state.tenants or []
+            tenant_options = {
+                f"דירה {t['apartment']:>3} – {t['tenant_name']}": t for t in tenants
+            }
+            st.caption(f"{len(unmatched)} תנועות ממתינות לשיוך")
 
-        _year = "2026"
-        if st.session_state.payment_month:
-            _parts = str(st.session_state.payment_month).split("/")
-            if len(_parts) == 2 and _parts[1].isdigit():
-                _year = _parts[1]
+            _year = "2026"
+            if st.session_state.payment_month:
+                _parts = str(st.session_state.payment_month).split("/")
+                if len(_parts) == 2 and _parts[1].isdigit():
+                    _year = _parts[1]
 
-        HEB_SHORT = {
-            "01":"ינו׳","02":"פבר׳","03":"מרץ","04":"אפר׳",
-            "05":"מאי", "06":"יוני","07":"יולי","08":"אוג׳",
-            "09":"ספט׳","10":"אוק׳","11":"נוב׳","12":"דצמ׳",
-        }
-        HEB_FULL = {
-            "01":"ינואר","02":"פברואר","03":"מרץ","04":"אפריל",
-            "05":"מאי",  "06":"יוני",  "07":"יולי","08":"אוגוסט",
-            "09":"ספטמבר","10":"אוקטובר","11":"נובמבר","12":"דצמבר",
-        }
+            HEB_SHORT = {
+                "01":"ינו׳","02":"פבר׳","03":"מרץ","04":"אפר׳",
+                "05":"מאי", "06":"יוני","07":"יולי","08":"אוג׳",
+                "09":"ספט׳","10":"אוק׳","11":"נוב׳","12":"דצמ׳",
+            }
+            HEB_FULL = {
+                "01":"ינואר","02":"פברואר","03":"מרץ","04":"אפריל",
+                "05":"מאי",  "06":"יוני",  "07":"יולי","08":"אוגוסט",
+                "09":"ספטמבר","10":"אוקטובר","11":"נובמבר","12":"דצמבר",
+            }
 
-        _ledger_reader = None
-        if st.session_state.ledger_path:
-            try:
-                _ledger_reader = LedgerReader(st.session_state.ledger_path)
-            except Exception:
-                pass
+            _ledger_reader = None
+            if st.session_state.ledger_path:
+                try:
+                    _ledger_reader = LedgerReader(st.session_state.ledger_path)
+                except Exception:
+                    pass
 
-        def _cell_status(val, full_amount):
-            try:
-                v = float(val) if val not in (None, "", 0) else 0.0
-            except (TypeError, ValueError):
-                v = 0.0
-            if v == 0:
-                return "⬜", v
-            elif v < full_amount:
-                return f"🟡", v
-            else:
-                return f"🟢", v
-
-        for idx, r in enumerate(unmatched):
-            tx    = r["transaction"]
-            label = tx.get("sender_name") or tx["description"]
-
-            if f"alloc_{idx}" not in st.session_state:
-                st.session_state[f"alloc_{idx}"] = 0.0
-            if f"target_{idx}" not in st.session_state:
-                st.session_state[f"target_{idx}"] = \
-                    tx.get("payment_month") or st.session_state.payment_month
-
-            with st.expander(
-                f"📌 {tx['date']}  |  ₪{tx['amount']:.2f}  |  {label}",
-                expanded=True
-            ):
-                col_t, col_rem = st.columns([3, 1])
-
-                _pre = 0
-                if r.get("tenant"):
-                    _key = f"דירה {r['tenant']['apartment']:>3} – {r['tenant']['tenant_name']}"
-                    _opts = ["— לא לשייך —"] + list(tenant_options.keys())
-                    if _key in _opts:
-                        _pre = _opts.index(_key)
-
-                chosen = col_t.selectbox(
-                    "דייר",
-                    ["— לא לשייך —"] + list(tenant_options.keys()),
-                    index=_pre,
-                    key=f"sel_{idx}",
-                )
-                _allocated = st.session_state[f"alloc_{idx}"]
-                _remaining = tx["amount"] - _allocated
-                col_rem.metric("נותר לחלוקה", f"₪{_remaining:.2f}",
-                               delta=f"-₪{_allocated:.2f}" if _allocated else None,
-                               delta_color="inverse")
-
-                if r.get("amount_mismatch"):
-                    _exp = (r.get("tenant") or {}).get("monthly_fee", "?")
-                    st.warning(f"⚠️ שולם ₪{tx['amount']:.2f} | צפוי ₪{_exp}")
-
-                with st.expander("פרטי בנק", expanded=False):
-                    st.write("**תאור מורחב:**", tx.get("raw_detail") or "—")
-                    st.write("**רמז דירה:**",    tx.get("apt_hint") or "לא זוהה")
-                    if r.get("tenant"):
-                        st.write("**הצעת מערכת:**", r.get("match_detail", ""))
-
-                _tenant_obj  = tenant_options.get(chosen) if chosen != "— לא לשייך —" else None
-                _apt         = _tenant_obj["apartment"] if _tenant_obj else None
-                _monthly_fee = (_tenant_obj.get("monthly_fee") or 350) if _tenant_obj else 350
-
-                st.markdown("**בחר חודש יעד:**")
-                _sel = st.session_state[f"target_{idx}"]
-
-                for _row_start in (0, 6):
-                    _cols6 = st.columns(6)
-                    for _i, _c in enumerate(_cols6):
-                        _mi   = _row_start + _i
-                        _mm   = f"{_mi + 1:02d}"
-                        _mstr = f"{_mm}/{_year}"
-                        _raw  = (_ledger_reader.read_payment(_apt, _mstr)
-                                 if _ledger_reader and _apt else None)
-                        _emoji, _cv = _cell_status(_raw, _monthly_fee)
-                        _is_sel = _sel == _mstr
-                        _cv_str = f" {_cv:.0f}" if _cv else ""
-                        _lbl    = f"{'✓ ' if _is_sel else ''}{HEB_SHORT[_mm]} {_emoji}{_cv_str}"
-                        if _c.button(_lbl, key=f"p_{idx}_{_mm}",
-                                     type="primary" if _is_sel else "secondary",
-                                     use_container_width=True):
-                            st.session_state[f"target_{idx}"] = _mstr
-                            st.rerun()
-
-                _praw       = (_ledger_reader.read_petty(_apt)
-                               if _ledger_reader and _apt else None)
-                _pemoji, _pv = _cell_status(_praw, PETTY_CASH_DEFAULT)
-                _is_psel    = _sel == "petty"
-                _plbl = (
-                    f"{'✓ ' if _is_psel else ''}קופה קטנה  "
-                    f"{_pemoji}{f'  ₪{_pv:.0f}' if _pv else ''}  /  ₪{PETTY_CASH_DEFAULT}"
-                )
-                if st.button(_plbl, key=f"p_{idx}_petty",
-                             type="primary" if _is_psel else "secondary",
-                             use_container_width=True):
-                    st.session_state[f"petty"] = "petty"
-                    st.rerun()
-
-                st.divider()
-                if not _sel:
-                    st.info("בחר חודש או קופה קטנה מהרשת למעלה")
+            def _cell_status(val, full_amount):
+                try:
+                    v = float(val) if val not in (None, "", 0) else 0.0
+                except (TypeError, ValueError):
+                    v = 0.0
+                if v == 0:
+                    return "⬜", v
+                elif v < full_amount:
+                    return f"🟡", v
                 else:
-                    if _sel == "petty":
-                        _target_lbl  = f"קופה קטנה  (נוכחי ₪{_pv:.0f} / ₪{PETTY_CASH_DEFAULT})"
-                        _default_amt = tx["amount"]
+                    return f"🟢", v
+
+            for idx, r in enumerate(unmatched):
+                tx    = r["transaction"]
+                label = tx.get("sender_name") or tx["description"]
+
+                if f"alloc_{idx}" not in st.session_state:
+                    st.session_state[f"alloc_{idx}"] = 0.0
+                if f"target_{idx}" not in st.session_state:
+                    if tx.get("petty_cash"):
+                        st.session_state[f"target_{idx}"] = "petty"   # pre-select קופה קטנה
                     else:
-                        _sel_mm  = _sel.split("/")[0]
-                        _cur_raw = (_ledger_reader.read_payment(_apt, _sel)
-                                    if _ledger_reader and _apt else None)
-                        try:
-                            _cur_v = float(_cur_raw) if _cur_raw not in (None, "", 0) else 0.0
-                        except (TypeError, ValueError):
-                            _cur_v = 0.0
-                        _cur_str    = f"  —  נוכחי ₪{_cur_v:.0f}" if _cur_v else ""
-                        _target_lbl = f"{HEB_FULL.get(_sel_mm, _sel_mm)} ({_sel}){_cur_str}"
-                        _default_amt = tx["amount"]
+                        st.session_state[f"target_{idx}"] = \
+                            tx.get("payment_month") or st.session_state.payment_month
 
-                    st.markdown(f"**יעד:** {_target_lbl}")
-                    _ca, _cb = st.columns([2, 1])
-                    _amt_in  = _ca.number_input(
-                        "סכום להוספה (₪)",
-                        value=float(_default_amt),
-                        min_value=0.0,
-                        step=10.0,
-                        key=f"amt_{idx}",
+                with st.expander(
+                    f"📌 {tx['date']}  |  ₪{tx['amount']:.2f}  |  {label}",
+                    expanded=True
+                ):
+                    col_t, col_rem = st.columns([3, 1])
+
+                    _pre = 0
+                    if r.get("tenant"):
+                        _key = f"דירה {r['tenant']['apartment']:>3} – {r['tenant']['tenant_name']}"
+                        _opts = ["— לא לשייך —"] + list(tenant_options.keys())
+                        if _key in _opts:
+                            _pre = _opts.index(_key)
+
+                    chosen = col_t.selectbox(
+                        "דייר",
+                        ["— לא לשייך —"] + list(tenant_options.keys()),
+                        index=_pre,
+                        key=f"sel_{idx}",
                     )
+                    _allocated = st.session_state[f"alloc_{idx}"]
+                    _remaining = tx["amount"] - _allocated
+                    col_rem.metric("נותר לחלוקה", f"₪{_remaining:.2f}",
+                                   delta=f"-₪{_allocated:.2f}" if _allocated else None,
+                                   delta_color="inverse")
 
-                    if _remaining <= 0:
-                        _cb.success("✓ כל הסכום חולק")
-                    elif _cb.button("➕ הוסף", key=f"add_{idx}",
-                                    use_container_width=True, type="primary"):
-                        if not _tenant_obj:
-                            st.warning("נא לבחור דייר")
-                        elif not st.session_state.ledger_path:
-                            st.error("אין גיליון פתוח")
-                        else:
-                            _u = LedgerUpdater(st.session_state.ledger_path)
-                            if _sel == "petty":
-                                _ok, _msg = _u.write_petty_cash(_apt, _amt_in, mode="add")
-                            else:
-                                _ok, _msg = _u.write_payment(_apt, _sel, _amt_in, mode="add")
-                            _u.save()
-                            (st.success if _ok else st.error)(_msg)
-                            if _ok:
-                                st.session_state[f"alloc_{idx}"] = _allocated + _amt_in
-                                with open(st.session_state.ledger_path, "rb") as _f:
-                                    st.download_button(
-                                        "⬇️ הורד",
-                                        _f.read(),
-                                        file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
-                                        key=f"dl_{idx}",
-                                    )
+                    if r.get("amount_mismatch"):
+                        _exp = (r.get("tenant") or {}).get("monthly_fee", "?")
+                        st.warning(f"⚠️ שולם ₪{tx['amount']:.2f} | צפוי ₪{_exp}")
+
+                    with st.expander("פרטי בנק", expanded=False):
+                        st.write("**תאור מורחב:**", tx.get("raw_detail") or "—")
+                        st.write("**רמז דירה:**",    tx.get("apt_hint") or "לא זוהה")
+                        if r.get("tenant"):
+                            st.write("**הצעת מערכת:**", r.get("match_detail", ""))
+
+                    _tenant_obj  = tenant_options.get(chosen) if chosen != "— לא לשייך —" else None
+                    _apt         = _tenant_obj["apartment"] if _tenant_obj else None
+                    _monthly_fee = (_tenant_obj.get("monthly_fee") or 350) if _tenant_obj else 350
+
+                    st.markdown("**בחר חודש יעד:**")
+                    _sel = st.session_state[f"target_{idx}"]
+
+                    for _row_start in (0, 6):
+                        _cols6 = st.columns(6)
+                        for _i, _c in enumerate(_cols6):
+                            _mi   = _row_start + _i
+                            _mm   = f"{_mi + 1:02d}"
+                            _mstr = f"{_mm}/{_year}"
+                            _raw  = (_ledger_reader.read_payment(_apt, _mstr)
+                                     if _ledger_reader and _apt else None)
+                            _emoji, _cv = _cell_status(_raw, _monthly_fee)
+                            _is_sel = _sel == _mstr
+                            _cv_str = f" {_cv:.0f}" if _cv else ""
+                            _lbl    = f"{'✓ ' if _is_sel else ''}{HEB_SHORT[_mm]} {_emoji}{_cv_str}"
+                            if _c.button(_lbl, key=f"p_{idx}_{_mm}",
+                                         type="primary" if _is_sel else "secondary",
+                                         use_container_width=True):
+                                st.session_state[f"target_{idx}"] = _mstr
                                 st.rerun()
 
+                    _praw       = (_ledger_reader.read_petty(_apt)
+                                   if _ledger_reader and _apt else None)
+                    _pemoji, _pv = _cell_status(_praw, PETTY_CASH_DEFAULT)
+                    _is_psel    = _sel == "petty"
+                    _plbl = (
+                        f"{'✓ ' if _is_psel else ''}קופה קטנה  "
+                        f"{_pemoji}{f'  ₪{_pv:.0f}' if _pv else ''}  /  ₪{PETTY_CASH_DEFAULT}"
+                    )
+                    if st.button(_plbl, key=f"p_{idx}_petty",
+                                 type="primary" if _is_psel else "secondary",
+                                 use_container_width=True):
+                        st.session_state[f"petty"] = "petty"
+                        st.rerun()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 – Expenses
-# ══════════════════════════════════════════════════════════════════════════════
+                    st.divider()
+                    if not _sel:
+                        st.info("בחר חודש או קופה קטנה מהרשת למעלה")
+                    else:
+                        if _sel == "petty":
+                            _target_lbl  = f"קופה קטנה  (נוכחי ₪{_pv:.0f} / ₪{PETTY_CASH_DEFAULT})"
+                            _default_amt = tx["amount"]
+                        else:
+                            _sel_mm  = _sel.split("/")[0]
+                            _cur_raw = (_ledger_reader.read_payment(_apt, _sel)
+                                        if _ledger_reader and _apt else None)
+                            try:
+                                _cur_v = float(_cur_raw) if _cur_raw not in (None, "", 0) else 0.0
+                            except (TypeError, ValueError):
+                                _cur_v = 0.0
+                            _cur_str    = f"  —  נוכחי ₪{_cur_v:.0f}" if _cur_v else ""
+                            _target_lbl = f"{HEB_FULL.get(_sel_mm, _sel_mm)} ({_sel}){_cur_str}"
+                            _default_amt = tx["amount"]
+
+                        st.markdown(f"**יעד:** {_target_lbl}")
+                        _ca, _cb = st.columns([2, 1])
+                        _amt_in  = _ca.number_input(
+                            "סכום להוספה (₪)",
+                            value=float(_default_amt),
+                            min_value=0.0,
+                            step=10.0,
+                            key=f"amt_{idx}",
+                        )
+
+                        if _remaining <= 0:
+                            _cb.success("✓ כל הסכום חולק")
+                        elif _cb.button("➕ הוסף", key=f"add_{idx}",
+                                        use_container_width=True, type="primary"):
+                            if not _tenant_obj:
+                                st.warning("נא לבחור דייר")
+                            elif not st.session_state.ledger_path:
+                                st.error("אין גיליון פתוח")
+                            else:
+                                _u = LedgerUpdater(st.session_state.ledger_path)
+                                if _sel == "petty":
+                                    _ok, _msg = _u.write_petty_cash(_apt, _amt_in, mode="add")
+                                else:
+                                    _ok, _msg = _u.write_payment(_apt, _sel, _amt_in, mode="add")
+                                _u.save()
+                                (st.success if _ok else st.error)(_msg)
+                                if _ok:
+                                    st.session_state[f"alloc_{idx}"] = _allocated + _amt_in
+                                    with open(st.session_state.ledger_path, "rb") as _f:
+                                        st.download_button(
+                                            "⬇️ הורד",
+                                            _f.read(),
+                                            file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
+                                            key=f"dl_{idx}",
+                                        )
+                                    st.rerun()
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 4 – Expenses
+    # ══════════════════════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("הוצאות – ניתוח חיובים")
 

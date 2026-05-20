@@ -19,6 +19,7 @@ Result dict:
     "confidence":   0.0–1.0,
     "match_method": "apt_hint" | "fuzzy_name" | "unmatched",
     "match_detail": human-readable string,
+    "petty_cash":   bool,   # mirrored from transaction for convenience
 }
 """
 
@@ -55,14 +56,22 @@ def _best_fuzzy(sender_name, tenants):
     return best_tenant, confidence, detail
 
 
-
 def _flag_mismatch(result: dict) -> None:
     """
     Sets result["amount_mismatch"] = True and result["needs_manual"] = True
     when the paid amount differs from the tenant's expected monthly_fee.
-    Only flags when monthly_fee is set (> 0).
+
+    FIX Bug 2: petty cash payments (קופה קטנה in memo) are intentionally ≠ 350.
+    They must NOT be flagged as a mismatch — instead they go to manual review
+    with the קופה קטנה column pre-selected (handled in app.py).
     """
-    tenant = result.get("tenant") or {}
+    # Petty cash payments bypass the mismatch check entirely
+    if result["transaction"].get("petty_cash"):
+        result["amount_mismatch"] = False
+        result["needs_manual"]    = True   # still goes to Tab 3, but pre-targeted to petty cash
+        return
+
+    tenant   = result.get("tenant") or {}
     expected = tenant.get("monthly_fee", 0)
     paid     = result["transaction"].get("amount", 0)
     if expected > 0 and paid != expected:
@@ -89,6 +98,7 @@ def match_transactions(transactions, tenants, fuzzy_threshold=FUZZY_THRESHOLD):
             "confidence":   0.0,
             "match_method": "unmatched",
             "match_detail": "",
+            "petty_cash":   tx.get("petty_cash", False),
         }
 
         # Stage 1: apartment number hint in description
