@@ -15,7 +15,10 @@ from matcher import match_transactions, FUZZY_THRESHOLD
 from excel_updater import (apply_matches, apply_expense_matches,
                             write_raw_transactions_tab,
                             LedgerUpdater, LedgerReader, ExpenseUpdater,
-                            PETTY_CASH_DEFAULT)
+                            PETTY_CASH_DEFAULT,
+                            LedgerDashboardReader, WishlistManager,
+                            PAYING_APTS, MONTHLY_FEE, TOTAL_APTS,
+                            PETTY_AMOUNT, WISHLIST_STATUS_OPT)
 
 st.set_page_config(
     page_title="האגמית 7 – גביה",
@@ -35,12 +38,12 @@ st.title("🏢 האגמית 7 – התאמת תשלומים")
 
 for key in ("matched","unmatched","tenants","ledger_path","ledger_filename","payment_month",
             "written","skipped","debits_matched","debits_unmatched","expense_written",
-            "expense_skipped","raw_tab_count","raw_tab_name"):
+            "expense_skipped","raw_tab_count","raw_tab_name","dashboard","wishlist_mgr"):
     if key not in st.session_state:
         st.session_state[key] = None
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "⚙️ הרצה", "✅ התאמות אוטומטיות", "🔍 בדיקה ידנית", "💸 הוצאות", "📋 יומן כתיבה"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "⚙️ הרצה", "✅ התאמות אוטומטיות", "🔍 בדיקה ידנית", "💸 הוצאות", "📋 יומן כתיבה", "📊 תכנון תקציבי"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -204,14 +207,7 @@ with tab1:
             if raw_sheet and raw_sheet != "—":
                 st.success(f"✅ טאב גולמי נוצר: **{raw_sheet}** ({raw_count} שורות)")
 
-            with open(str(ledger_path), "rb") as f:
-                st.download_button(
-                    "⬇️ הורד גיליון מעודכן",
-                    f.read(),
-                    file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            st.info("⬅️ עבור לטאב **יומן כתיבה** להורדת הגיליון המעודכן")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -458,13 +454,6 @@ with tab3:
                                 (st.success if _ok else st.error)(_msg)
                                 if _ok:
                                     st.session_state[f"alloc_{idx}"] = _allocated + _amt_in
-                                    with open(st.session_state.ledger_path, "rb") as _f:
-                                        st.download_button(
-                                            "⬇️ הורד",
-                                            _f.read(),
-                                            file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
-                                            key=f"dl_{idx}",
-                                        )
                                     st.rerun()
 
 
@@ -532,13 +521,6 @@ with tab4:
                         st.session_state.expense_written = ew
                         st.session_state.expense_skipped = es
                         st.success(f"נכתבו {len(ew)} | דולגו {len(es)}")
-                        with open(st.session_state.ledger_path, "rb") as f:
-                            st.download_button(
-                                "⬇️ הורד גיליון מעודכן",
-                                f.read(),
-                                file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
-                                key="dl_exp_auto"
-                            )
                     except Exception as e:
                         st.error(f"שגיאה בכתיבה: {e}")
 
@@ -612,14 +594,6 @@ with tab4:
                                         msg += f"\n{'✓' if c_ok else '⚠️'} הערה: {c_msg}"
                                 eu2.save()
                                 (st.success if ok else st.error)(msg)
-                                if ok:
-                                    with open(st.session_state.ledger_path, "rb") as f:
-                                        st.download_button(
-                                            "⬇️ הורד גיליון מעודכן",
-                                            f.read(),
-                                            file_name=(st.session_state.ledger_filename or "גיליון.xlsx"),
-                                            key=f"dl_exp_{idx}"
-                                        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -675,21 +649,627 @@ with tab5:
                 file_bytes = None
 
             if file_bytes:
-                col_save, col_dl = st.columns(2)
+                st.divider()
+                st.markdown("### 💾 שמירה והורדה")
 
-                if col_save.button("💾 שמור לOneDrive", type="primary",
-                                   use_container_width=True, key="final_save"):
-                    try:
-                        onedrive_path.write_bytes(file_bytes)
-                        st.success(f"✓ נשמר: {onedrive_path}")
-                    except Exception as e:
-                        st.error(f"שגיאה בשמירה לOneDrive: {e}")
+                col_onedrive, col_local = st.columns(2)
 
-                col_dl.download_button(
-                    "⬇️ הורד לדפדפן",
-                    file_bytes,
-                    file_name=original_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="final_dl",
+                # ── Left: Save to OneDrive (atomic replace to beat sync lock) ──
+                with col_onedrive:
+                    st.markdown("**שמירה ל-OneDrive**")
+                    st.caption(f"📁 `{onedrive_path}`")
+                    if st.button(
+                        "☁️ שמור ל-OneDrive",
+                        type="primary",
+                        use_container_width=True,
+                        key="final_save",
+                    ):
+                        try:
+                            import os, tempfile
+                            # Write to a temp file in the SAME folder, then
+                            # atomically replace the target. This avoids the
+                            # OneDrive sync-lock race that rejects a direct write.
+                            tmp_fd, tmp_path = tempfile.mkstemp(
+                                dir=onedrive_path.parent,
+                                suffix=".tmp",
+                            )
+                            try:
+                                with os.fdopen(tmp_fd, "wb") as tmp_f:
+                                    tmp_f.write(file_bytes)
+                                os.replace(tmp_path, onedrive_path)
+                                st.success(f"✓ נשמר בהצלחה:\n{onedrive_path}")
+                            except Exception:
+                                try:
+                                    os.unlink(tmp_path)
+                                except OSError:
+                                    pass
+                                raise
+                        except Exception as e:
+                            st.error(f"שגיאה בשמירה ל-OneDrive:\n{e}")
+
+                # ── Right: Download to browser ─────────────────────────────────
+                with col_local:
+                    st.markdown("**הורדה מקומית**")
+                    st.caption("📥 שמירה ישירה דרך הדפדפן")
+                    st.download_button(
+                        "⬇️ הורד לדפדפן",
+                        file_bytes,
+                        file_name=original_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="final_dl",
+                    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 – Financial Planning Dashboard
+# ══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    st.subheader("📊 תכנון תקציבי 2026")
+
+    # ── Ledger source: Tab 1 session OR direct upload here ───────────────────
+    _tab6_upload = st.file_uploader(
+        "העלה גיליון ניהול ישירות (אופציונלי — אם לא הרצת טאב 1)",
+        type=["xlsx"],
+        key="tab6_ledger_upload",
+        help="אם כבר הרצת התאמה בטאב 1 הגיליון טעון אוטומטית — לא נדרשת העלאה חוזרת",
+    )
+    if _tab6_upload is not None:
+        _tab6_tmp = Path("tmp/vaad")
+        _tab6_tmp.mkdir(parents=True, exist_ok=True)
+        _tab6_ledger_path_direct = str(_tab6_tmp.resolve() / "master_ledger_tab6.xlsx")
+        Path(_tab6_ledger_path_direct).write_bytes(_tab6_upload.read())
+        st.session_state["tab6_ledger_path"]     = _tab6_ledger_path_direct
+        st.session_state["tab6_ledger_filename"] = _tab6_upload.name
+
+    _resolved_ledger_path = (
+        st.session_state.get("tab6_ledger_path") or st.session_state.ledger_path
+    )
+    _resolved_ledger_filename = (
+        st.session_state.get("tab6_ledger_filename")
+        or st.session_state.ledger_filename
+        or "master_ledger.xlsx"
+    )
+
+    col_load, col_info = st.columns([1, 3])
+    with col_load:
+        load_dashboard = st.button(
+            "🔄 טען נתוני דשבורד",
+            type="primary",
+            use_container_width=True,
+            key="load_dashboard",
+        )
+    with col_info:
+        if _resolved_ledger_path:
+            _src_lbl = "טאב 1" if not st.session_state.get("tab6_ledger_path") else "העלאה ישירה"
+            st.caption(
+                f"✓ גיליון: `{_resolved_ledger_filename}` ({_src_lbl})  "
+                f"— לחץ 'טען' לאחר כל שינוי בגיליון"
+            )
+        else:
+            st.caption("⚠️ אין גיליון — הרץ התאמה בטאב 1 או העלה גיליון ישירות למעלה")
+
+    if load_dashboard:
+        if not _resolved_ledger_path:
+            st.error("נא להעלות גיליון ניהול — ישירות כאן למעלה, או דרך טאב 1")
+        else:
+            with st.spinner("קורא נתונים פיננסיים מהגיליון…"):
+                try:
+                    st.session_state["dashboard"]    = LedgerDashboardReader(_resolved_ledger_path)
+                    st.session_state["wishlist_mgr"] = WishlistManager(_resolved_ledger_path)
+                    st.success("✓ נתונים נטענו בהצלחה")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"שגיאה בטעינת נתוני דשבורד: {_e}")
+
+    _d = st.session_state.get("dashboard")
+
+    if _d is None:
+        st.info("לחץ על **'טען נתוני דשבורד'** להצגת הניתוח הפיננסי")
+    else:
+        # ═══════════════════════════════════════════════════════════════════
+        # SECTION A – Operating Budget Health
+        # ═══════════════════════════════════════════════════════════════════
+        st.divider()
+        st.markdown("## 📈 סעיף א׳ — מצב תפעולי")
+
+        # ── A1: Top-line health metrics ────────────────────────────────────
+        _ma1, _ma2, _ma3, _ma4 = st.columns(4)
+
+        _cr = _d.coverage_ratio
+        _cr_icon = "🟢" if _cr >= 1.1 else ("🟡" if _cr >= 0.9 else "🔴")
+        _ma1.metric(
+            f"{_cr_icon} יחס כיסוי חודשי",
+            f"{_cr:.1%}",
+            help=(
+                "ממוצע הכנסה חודשית ÷ ממוצע הוצאות קבועות חודשיות\n\n"
+                "מקור הכנסה: גביה 2026 · כל עמודות החודשים · שורות 2–61\n"
+                "מקור הוצאה: הוצאות 2026 · עמודה N · שורות 2–12"
+            ),
+        )
+
+        _coll_pct = (_d.ytd_collected / _d.annual_income_potential * 100) if _d.annual_income_potential else 0
+        _ma2.metric(
+            "📥 גביה YTD",
+            f"₪{_d.ytd_collected:,.0f}",
+            delta=f"{_coll_pct:.0f}% מהפוטנציאל השנתי",
+            help=(
+                f"סה״כ שנגבה מכל הדירות עד כה\n\n"
+                f"מקור: גביה 2026 · כל עמודות החודשים · שורות 2–61\n"
+                f"פוטנציאל: {PAYING_APTS} דירות × ₪{MONTHLY_FEE} × 12 = ₪{_d.annual_income_potential:,.0f}"
+            ),
+        )
+
+        _ma3.metric(
+            "📅 חודשים עם נתונים",
+            f"{_d.months_with_data} / 12",
+            help=(
+                "מספר החודשים שנמצאו ערכים בגיליון ההוצאות\n"
+                "ממוצעים וטווחים (min/max) מבוססים על חודשים אלה בלבד\n\n"
+                "מקור: הוצאות 2026 · שורות 2–12 · ספירת תאים מלאים"
+            ),
+        )
+
+        _ma4.metric(
+            "🏗️ הוצאות קבועות YTD",
+            f"₪{_d.fixed_ytd:,.0f}",
+            help="מקור: הוצאות 2026 · שורות 2–12 · עמודה O (סה״כ שנתי)",
+        )
+
+        # ── A2: Fixed costs breakdown table ───────────────────────────────
+        st.markdown("### 🏗️ הוצאות קבועות — Bucket 1")
+        if _d.months_with_data <= 3:
+            st.warning(
+                f"⚠️ ממוצע מבוסס על **{_d.months_with_data} חודשים** בלבד — "
+                f"תחזית שנתית עדיין לא בשלה. min/max ייצוב לאחר ≥6 חודשים."
+            )
+
+        _fixed_rows_display = []
+        for _fr in _d.fixed_rows:
+            _conf = f"⚠️ {_fr['months_count']}מ׳" if _fr["months_count"] < 6 else f"✓ {_fr['months_count']}מ׳"
+            _fixed_rows_display.append({
+                "קטגוריה":                _fr["category"],
+                "סה״כ YTD ₪":            f"{_fr['total']:,.0f}" if _fr["total"] else "—",
+                "ממוצע/חודש ₪":          f"{_fr['avg']:,.0f}"   if _fr["avg"]   else "—",
+                "מינ׳ ₪":                f"{_fr['min']:,.0f}"   if _fr["min"]   else "—",
+                "מקס׳ ₪":               f"{_fr['max']:,.0f}"   if _fr["max"]   else "—",
+                "תחזית שנתית ₪":         f"{_fr['avg']*12:,.0f}" if _fr["avg"] else "—",
+                "בסיס":                  _conf,
+                "מקור":                  f"שורה {_fr['row']} · עמ׳ O, N",
+            })
+
+        # Totals row
+        _fixed_rows_display.append({
+            "קטגוריה":        "סה״כ",
+            "סה״כ YTD ₪":     f"{_d.fixed_ytd:,.0f}",
+            "ממוצע/חודש ₪":   f"{_d.fixed_avg_monthly:,.0f}",
+            "מינ׳ ₪":         f"{_d.fixed_min_monthly:,.0f}",
+            "מקס׳ ₪":        f"{_d.fixed_max_monthly:,.0f}",
+            "תחזית שנתית ₪":  f"{_d.fixed_proj_annual:,.0f}",
+            "בסיס":           f"{_d.months_with_data} חודשים",
+            "מקור":           "שורות 2–12 · עמ׳ O, N",
+        })
+
+        _df_fixed = pd.DataFrame(_fixed_rows_display)
+
+        def _style_fixed_tbl(row):
+            if row["קטגוריה"] == "סה״כ":
+                return [
+                    "font-weight:bold;background-color:#2E4057;color:white"
+                ] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            _df_fixed.style.apply(_style_fixed_tbl, axis=1),
+            use_container_width=True,
+            hide_index=True,
+            height=min(40 * (len(_fixed_rows_display) + 1) + 40, 520),
+        )
+
+        # Projection range note
+        _pb1, _pb2, _pb3 = st.columns(3)
+        _pb1.metric(
+            "תחזית שנתית (ממוצע)",
+            f"₪{_d.fixed_proj_annual:,.0f}",
+            help="הוצאות 2026 · עמודה N (ממוצע חודשי) · שורות 2–12 · × 12",
+        )
+        _pb2.metric(
+            "תחזית שנתית (מינימום)",
+            f"₪{_d.fixed_proj_min:,.0f}",
+            help="min לכל חודש שנרשם · × 12",
+        )
+        _pb3.metric(
+            "תחזית שנתית (מקסימום)",
+            f"₪{_d.fixed_proj_max:,.0f}",
+            help="max לכל חודש שנרשם · × 12",
+        )
+
+        # ── A3: Payment Heatmap ────────────────────────────────────────────
+        st.markdown("### 🗓️ מפת גביה — דיירים × חודשים")
+        st.caption(
+            "מקור: גביה 2026 · עמודות חודשים · שורות 2–61  |  "
+            "🟢 שולם מלא  🟡 חלקי  ⬜ לא שולם"
+        )
+
+        _tenants_list = st.session_state.tenants or []
+        _fee_map  = {t["apartment"]: t.get("monthly_fee", MONTHLY_FEE) for t in _tenants_list}
+        _name_map = {t["apartment"]: t.get("tenant_name", "")          for t in _tenants_list}
+
+        _HEB_SHORT = {
+            "01":"ינו׳","02":"פבר׳","03":"מרץ","04":"אפר׳",
+            "05":"מאי","06":"יוני","07":"יולי","08":"אוג׳",
+            "09":"ספט׳","10":"אוק׳","11":"נוב׳","12":"דצמ׳",
+        }
+
+        _all_mm = sorted(
+            {mm for months in _d.payment_grid.values() for mm in months}
+        ) if _d.payment_grid else []
+
+        if _all_mm and _d.payment_grid:
+            _heat_data = {}
+            for _apt in sorted(_d.payment_grid.keys()):
+                _row_lbl = f"ד׳{_apt:02d} {_name_map.get(_apt,'')[:12]}"
+                _fee     = _fee_map.get(_apt, MONTHLY_FEE)
+                _heat_data[_row_lbl] = {
+                    _HEB_SHORT.get(_mm, _mm): _d.payment_grid[_apt].get(_mm, 0.0)
+                    for _mm in _all_mm
+                }
+
+            _df_heat = pd.DataFrame(_heat_data).T
+
+            def _color_heat(val):
+                try:
+                    v = float(val)
+                except Exception:
+                    v = 0.0
+                if v <= 0:
+                    return "background-color:#2a2a2a;color:#666"
+                elif v >= MONTHLY_FEE:
+                    return "background-color:#1a5c2a;color:#cff"
+                else:
+                    return "background-color:#7a5800;color:#ffe"
+
+            st.dataframe(
+                _df_heat.style.map(_color_heat).format("{:.0f}"),
+                use_container_width=True,
+                height=min(30 * len(_d.payment_grid) + 50, 700),
+            )
+
+            # Heatmap summary
+            _total_cells = sum(len(v) for v in _d.payment_grid.values())
+            _paid_cells  = sum(
+                1 for apt_months in _d.payment_grid.values()
+                for v in apt_months.values() if v > 0
+            )
+            _outstanding = sum(
+                max(0.0, _fee_map.get(_apt, MONTHLY_FEE) - _d.payment_grid[_apt].get(_mm, 0.0))
+                for _apt in _d.payment_grid
+                for _mm in _all_mm
+            )
+            _hc1, _hc2, _hc3 = st.columns(3)
+            _hc1.metric("תאים ששולמו", f"{_paid_cells} / {_total_cells}",
+                        help="גביה 2026 · ספירת תאים עם ערך > 0")
+            _hc2.metric("% גביה", f"{_paid_cells / _total_cells * 100:.0f}%" if _total_cells else "—")
+            _hc3.metric("חוב פוטנציאלי",  f"₪{_outstanding:,.0f}",
+                        help="הפרש בין תשלום צפוי לבין שולם לכל התאים הריקים")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # SECTION B – Reserve & Capital Planning
+        # ═══════════════════════════════════════════════════════════════════
+        st.divider()
+        st.markdown("## 🏦 סעיף ב׳ — תכנון עתודות")
+
+        _bcol1, _bcol2 = st.columns(2)
+
+        # ── B1: Bucket 2 Waterfall ─────────────────────────────────────────
+        with _bcol1:
+            st.markdown("### 💧 Bucket 2 — תחזוקה שוטפת (כללי)")
+
+            def _wf_row(label, amount, is_plus, source, width_pct=None):
+                _color = "#1a7a34" if is_plus else "#b03030"
+                _sign  = "+" if is_plus else "−"
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;padding:7px 12px;"
+                    f"border-left:4px solid {_color};margin-bottom:3px;"
+                    f"background:#1a1a2e;border-radius:2px'>"
+                    f"<span style='color:#ddd'>{label}</span>"
+                    f"<span style='color:{_color};font-weight:bold'>"
+                    f"{_sign}₪{abs(amount):,.0f}</span></div>",
+                    unsafe_allow_html=True,
                 )
+                st.caption(f"  ↳ {source}")
+
+            def _wf_result(label, amount):
+                _color = "#1a7a34" if amount >= 0 else "#b03030"
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;padding:10px 14px;"
+                    f"border:2px solid {_color};margin-top:10px;"
+                    f"background:#1a1a2e;border-radius:4px'>"
+                    f"<span style='font-weight:bold;color:#eee;font-size:1.05em'>{label}</span>"
+                    f"<span style='color:{_color};font-weight:bold;font-size:1.3em'>"
+                    f"₪{amount:,.0f}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+            _wf_row(
+                "הכנסה שנתית פוטנציאלית",
+                _d.annual_income_potential,
+                is_plus=True,
+                source=f"{PAYING_APTS} דירות × ₪{MONTHLY_FEE} × 12 | tenants.csv",
+            )
+            _wf_row(
+                "הוצאות קבועות (תחזית ממוצע)",
+                _d.fixed_proj_annual,
+                is_plus=False,
+                source=f"הוצאות 2026 · עמ׳ N (ממוצע) · שורות 2–12 · ×12 | טווח: ₪{_d.fixed_proj_min:,.0f}–₪{_d.fixed_proj_max:,.0f}",
+            )
+
+            _after_fixed = _d.annual_income_potential - _d.fixed_proj_annual
+            st.caption(
+                f"  ↔ לאחר הוצאות קבועות: **₪{_after_fixed:,.0f}** "
+                f"(טווח ₪{_d.annual_income_potential - _d.fixed_proj_max:,.0f}–"
+                f"₪{_d.annual_income_potential - _d.fixed_proj_min:,.0f})"
+            )
+
+            _wf_row(
+                "כללי שהוצא YTD",
+                _d.kelali_ytd,
+                is_plus=False,
+                source=f"הוצאות 2026 · שורה 13 · עמ׳ O (סה״כ שנתי) | ממוצע ₪{_d.kelali_avg:,.0f}/חודש",
+            )
+
+            _wf_result("תקציב תחזוקה פנוי 2026", _d.bucket2_remaining)
+
+            st.markdown("")
+            if _d.bucket2_monthly_rate > 0:
+                _runway = _d.bucket2_months_runway
+                _runway_str = f"~{_runway:.1f} חודשים" if _runway < 24 else "✓ מכוסה לשנה"
+                _rate_color = "#1a7a34" if _runway > 6 else "#b03030"
+                st.markdown(
+                    f"<div style='padding:8px 12px;background:#1a1a2e;border-radius:4px;"
+                    f"border-left:3px solid {_rate_color}'>"
+                    f"<span style='color:#aaa'>קצב הוצאת כללי YTD:</span> "
+                    f"<b style='color:#eee'>₪{_d.bucket2_monthly_rate:,.0f}/חודש</b><br>"
+                    f"<span style='color:#aaa'>מנוחה משוערת:</span> "
+                    f"<b style='color:{_rate_color}'>{_runway_str}</b></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info("אין הוצאות כללי YTD — קצב טרם ידוע")
+
+            # כללי comments
+            if _d.kelali_comments:
+                with st.expander("📝 הערות כללי לפי חודש (שורה 23)", expanded=False):
+                    for _mm_c, _txt in sorted(_d.kelali_comments.items()):
+                        st.write(f"**{_HEB_SHORT.get(_mm_c, _mm_c)}:** {_txt}")
+
+        # ── B2: Bucket 3 Capital Fund ──────────────────────────────────────
+        with _bcol2:
+            st.markdown("### 🏗️ Bucket 3 — קופה קטנה (פיתוח הון)")
+
+            # Collection progress bar
+            st.caption(
+                f"מקור גביה: גביה 2026 · עמודה Q · שורות 2–61  |  "
+                f"פוטנציאל: {TOTAL_APTS} × ₪{PETTY_AMOUNT:,} = ₪{_d.petty_potential:,}"
+            )
+            st.progress(
+                min(_d.petty_collection_pct / 100, 1.0),
+                text=(
+                    f"נגבה: ₪{_d.petty_total_collected:,.0f} מתוך ₪{_d.petty_potential:,.0f} "
+                    f"({_d.petty_collection_pct:.0f}%)  —  "
+                    f"{_d.petty_apts_paid} / {TOTAL_APTS} דירות שילמו"
+                ),
+            )
+
+            # Per-apt petty cash status (collapsed)
+            with st.expander("🔍 גביית קופה קטנה לפי דירה", expanded=False):
+                _petty_rows = []
+                for _apt in sorted(_d.petty_collected.keys()):
+                    _collected = _d.petty_collected[_apt]
+                    _status    = "✅ שולם" if _collected >= PETTY_AMOUNT else ("🟡 חלקי" if _collected > 0 else "⬜ לא שולם")
+                    _petty_rows.append({
+                        "דירה":    _apt,
+                        "דייר":    _name_map.get(_apt, ""),
+                        "גבוי ₪":  f"{_collected:,.0f}",
+                        "סטטוס":   _status,
+                    })
+                st.dataframe(
+                    pd.DataFrame(_petty_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=280,
+                )
+
+            st.markdown("")
+            # Spent projects
+            st.markdown("**הוצאות שבוצעו (קופה קטנה · שורות 3–5):**")
+            if _d.petty_spent_projects:
+                for _proj in _d.petty_spent_projects:
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"align-items:center;padding:6px 12px;"
+                        f"border-left:4px solid #b03030;margin-bottom:3px;"
+                        f"background:#1a1a2e;border-radius:2px'>"
+                        f"<span style='color:#ddd'>{_proj['name']}</span>"
+                        f"<span style='color:#e06060;font-weight:bold'>"
+                        f"−₪{_proj['total']:,.0f}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"  ↳ {_proj['source']}")
+            else:
+                st.info("לא נמצאו הוצאות בשורות 3–5 של טאב קופה קטנה")
+
+            # Available balance
+            _bal_color = "#1a7a34" if _d.petty_available >= 0 else "#b03030"
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;"
+                f"align-items:center;padding:10px 14px;"
+                f"border:2px solid {_bal_color};margin:10px 0;"
+                f"background:#1a1a2e;border-radius:4px'>"
+                f"<span style='font-weight:bold;color:#eee;font-size:1.05em'>יתרה זמינה</span>"
+                f"<span style='color:{_bal_color};font-weight:bold;font-size:1.3em'>"
+                f"₪{_d.petty_available:,.0f}</span></div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"יתרה = נגבה ₪{_d.petty_total_collected:,.0f} "
+                f"− הוצא ₪{_d.petty_total_spent:,.0f}"
+            )
+
+            # ── Wishlist ───────────────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("**📋 רשימת פרויקטים מתוכננים:**")
+            st.caption(f"מאוחסן בגיליון '{chr(0x05E8)}{chr(0x05E9)}{chr(0x05D9)}{chr(0x05DE)}{chr(0x05EA)} {chr(0x05E4)}{chr(0x05E8)}{chr(0x05D5)}{chr(0x05D9)}{chr(0x05E7)}{chr(0x05D8)}{chr(0x05D9)}{chr(0x05DD)}' בקובץ הלדג׳ר")
+
+            _wm = st.session_state.get("wishlist_mgr")
+            if _wm is None:
+                st.info("טען נתוני דשבורד כדי לנהל את הרשימה")
+            else:
+                _wishlist = _wm.read()
+
+                # Wishlist financial summary
+                _planned_cost = sum(
+                    i["cost"] for i in _wishlist
+                    if i["status"] in ("מתוכנן", "בביצוע")
+                )
+                _headroom = _d.petty_available - _planned_cost
+                _hc_color = "#1a7a34" if _headroom >= 0 else "#b03030"
+                _hc_icon  = "✅" if _headroom >= 0 else "⚠️"
+
+                _ws1, _ws2, _ws3 = st.columns(3)
+                _ws1.metric(
+                    "פרויקטים מתוכננים",
+                    f"₪{_planned_cost:,.0f}",
+                    help="סכום עלויות משוערות לפרויקטים במצב 'מתוכנן' ו'בביצוע' בלבד",
+                )
+                _ws2.metric(
+                    f"{_hc_icon} מרחב פנוי",
+                    f"₪{_headroom:,.0f}",
+                    delta="מכוסה" if _headroom >= 0 else "חריגה",
+                    delta_color="normal" if _headroom >= 0 else "inverse",
+                    help="יתרה זמינה פחות סכום פרויקטים מתוכננים ובביצוע",
+                )
+                _ws3.metric(
+                    "סה״כ פרויקטים",
+                    f"{len(_wishlist)}",
+                    delta=f"הושלמו: {sum(1 for i in _wishlist if i['status'] == 'הושלם')}",
+                )
+
+                # Wishlist table display
+                if _wishlist:
+                    _df_wish = pd.DataFrame([{
+                        "שם פרויקט": i["name"],
+                        "עלות (₪)":  f"{i['cost']:,.0f}",
+                        "סטטוס":     i["status"],
+                        "הערות":     i["notes"],
+                    } for i in _wishlist])
+
+                    def _style_wish_tbl(row):
+                        s = row["סטטוס"]
+                        if s == "הושלם":
+                            return ["background-color:#383838;color:#888"] * len(row)
+                        if s == "בביצוע":
+                            return ["background-color:#1e4620;color:#cfc"] * len(row)
+                        return ["background-color:#4a3e00;color:#ffe"] * len(row)
+
+                    st.dataframe(
+                        _df_wish.style.apply(_style_wish_tbl, axis=1),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(40 * len(_wishlist) + 50, 320),
+                    )
+                else:
+                    st.info("הרשימה ריקה — הוסף פרויקטים בטופס למטה")
+
+                # ── Edit / Add wishlist ────────────────────────────────────
+                with st.expander(
+                    "✏️ ערוך רשימת פרויקטים", expanded=(len(_wishlist) == 0)
+                ):
+                    _edit_items = list(_wishlist)
+
+                    # Edit existing items
+                    if _edit_items:
+                        st.markdown("**עריכת פרויקטים קיימים:**")
+                        _items_to_keep = []
+                        for _wi, _item in enumerate(_edit_items):
+                            _ec1, _ec2, _ec3, _ec4, _ec5 = st.columns([3, 2, 2, 3, 1])
+                            _new_name   = _ec1.text_input("שם",   _item["name"],   key=f"wl_n_{_wi}", label_visibility="collapsed")
+                            _new_cost   = _ec2.number_input("עלות", value=float(_item["cost"]), min_value=0.0, step=500.0, key=f"wl_c_{_wi}", label_visibility="collapsed")
+                            _new_status = _ec3.selectbox("סטטוס", WISHLIST_STATUS_OPT,
+                                                         index=WISHLIST_STATUS_OPT.index(_item["status"])
+                                                         if _item["status"] in WISHLIST_STATUS_OPT else 0,
+                                                         key=f"wl_s_{_wi}", label_visibility="collapsed")
+                            _new_notes  = _ec4.text_input("הערות", _item["notes"], key=f"wl_no_{_wi}", label_visibility="collapsed")
+                            _del_btn    = _ec5.button("🗑", key=f"wl_d_{_wi}", help="מחק שורה זו")
+
+                            if not _del_btn:
+                                _items_to_keep.append({
+                                    "name":   _new_name,
+                                    "cost":   _new_cost,
+                                    "status": _new_status,
+                                    "notes":  _new_notes,
+                                })
+
+                        if st.button("💾 שמור עריכות", use_container_width=True, key="wl_save_edits"):
+                            _wm.save(_items_to_keep)
+                            st.success(f"✓ נשמרו {len(_items_to_keep)} פרויקטים")
+                            st.rerun()
+
+                    # Add new project
+                    st.markdown("**הוסף פרויקט חדש:**")
+                    _na1, _na2, _na3, _na4 = st.columns([3, 2, 2, 3])
+                    _new_proj_name   = _na1.text_input("שם פרויקט",       key="wl_new_name",   placeholder="שם הפרויקט")
+                    _new_proj_cost   = _na2.number_input("עלות משוערת (₪)", min_value=0.0, step=500.0, key="wl_new_cost")
+                    _new_proj_status = _na3.selectbox("סטטוס", WISHLIST_STATUS_OPT,            key="wl_new_status")
+                    _new_proj_notes  = _na4.text_input("הערות",             key="wl_new_notes",  placeholder="הערות אופציונלי")
+
+                    if st.button("➕ הוסף פרויקט לרשימה", use_container_width=True,
+                                 type="primary", key="wl_add_btn"):
+                        if _new_proj_name.strip():
+                            _all_items = _wm.read()
+                            _all_items.append({
+                                "name":   _new_proj_name.strip(),
+                                "cost":   _new_proj_cost,
+                                "status": _new_proj_status,
+                                "notes":  _new_proj_notes,
+                            })
+                            _wm.save(_all_items)
+                            st.success(f"✓ פרויקט '{_new_proj_name}' נוסף ונשמר לגיליון")
+                            st.rerun()
+                        else:
+                            st.warning("נא להזין שם פרויקט")
+
+        # ── Section B bottom warning banner ───────────────────────────────
+        _warnings = []
+        if _d.coverage_ratio < 0.9:
+            _warnings.append(
+                f"⚠️ יחס כיסוי {_d.coverage_ratio:.0%} — הכנסה ממוצעת נמוכה מהוצאות קבועות"
+            )
+        if _d.bucket2_monthly_rate > 0 and _d.bucket2_months_runway < 3:
+            _warnings.append(
+                f"⚠️ תקציב תחזוקה שוטפת (כללי) צפוי להתאפס תוך {_d.bucket2_months_runway:.1f} חודשים"
+            )
+        if _d.bucket2_remaining < 0:
+            _warnings.append(
+                f"⚠️ תקציב תחזוקה שוטפת שלילי: ₪{_d.bucket2_remaining:,.0f} — הוצאות קבועות + כללי חורגות מהכנסה"
+            )
+        if _d.petty_available < 0:
+            _warnings.append(
+                f"⚠️ קופה קטנה: הוצאות (₪{_d.petty_total_spent:,.0f}) עולות על גביה (₪{_d.petty_total_collected:,.0f})"
+            )
+        _wm2 = st.session_state.get("wishlist_mgr")
+        if _wm2:
+            _wl2 = _wm2.read()
+            _planned2 = sum(i["cost"] for i in _wl2 if i["status"] in ("מתוכנן", "בביצוע"))
+            if _planned2 > _d.petty_available:
+                _warnings.append(
+                    f"⚠️ פרויקטים מתוכננים (₪{_planned2:,.0f}) עולים על יתרת קופה קטנה (₪{_d.petty_available:,.0f})"
+                )
+
+        if _warnings:
+            st.divider()
+            st.markdown("### 🚨 התראות")
+            for _w in _warnings:
+                st.error(_w)

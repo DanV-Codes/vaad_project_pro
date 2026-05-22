@@ -617,3 +617,347 @@ if __name__ == "__main__":
     u = LedgerUpdater(path)
     print("Months:", u.available_months)
     print("Apts  :", u.available_apts[:10], "…")
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 – Financial Dashboard additions
+# Append everything below to the bottom of excel_updater.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── HOA constants ─────────────────────────────────────────────────────────────
+PAYING_APTS  = 56    # apartments that pay monthly fee (4 committee apts exempt)
+MONTHLY_FEE  = 350   # ₪ per month per paying apartment
+TOTAL_APTS   = 60    # all apartments including committee
+PETTY_AMOUNT = 500   # ₪ per apartment per year for capital fund
+
+# ── Wishlist tab constants ─────────────────────────────────────────────────────
+WISHLIST_SHEET      = "רשימת פרויקטים"
+WISHLIST_COLS       = ["שם פרויקט", "עלות משוערת (₪)", "סטטוס", "הערות"]
+WISHLIST_STATUS_OPT = ["מתוכנן", "בביצוע", "הושלם"]
+
+# ── Expense sheet row/column constants used by dashboard ─────────────────────
+EXPENSE_TOTAL_COL           = 15   # Column O  – סה"כ שנתי (formula, read-only)
+EXPENSE_AVG_COL             = 14   # Column N  – live monthly average (formula, read-only)
+EXPENSE_FIXED_ROWS          = list(range(2, 13))   # rows 2–12  Bucket 1 fixed costs
+EXPENSE_KELALI_ROW          = 13   # row 13  כללי – variable maintenance
+EXPENSE_TOTAL_OPERATING_ROW = 16   # row 16  הוצאות שוטף (formula, read-only)
+EXPENSE_PETTY_TOTAL_ROW     = 17   # row 17  הוצאות לא שוטף (formula, read-only)
+EXPENSE_COMMENT_ROW_DASH    = 23   # row 23  free-text comment per month
+
+# ── קופה קטנה tab constants ───────────────────────────────────────────────────
+PETTY_CASH_SHEET  = "קופה קטנה"
+PETTY_SPENT_ROWS  = [3, 4, 5]    # rows 3–5: projects spent this year
+
+
+class LedgerDashboardReader:
+    """
+    Read-only snapshot of all financial data needed for Tab 6.
+    Every public attribute documents its ledger source via a companion _src dict.
+
+    Sources:
+      fixed_rows          → הוצאות 2026, rows 2–12, cols B–L (monthly), M (total), N (avg)
+      kelali              → הוצאות 2026, row 13
+      petty_collected     → גביה 2026, column Q (PETTY_CASH_COL = 17), rows 2–61
+      payment_grid        → גביה 2026, month columns E–P, rows 2–61
+      petty_spent_projects→ קופה קטנה, rows 3–5
+    """
+
+    @staticmethod
+    def _safe_float(val) -> float:
+        if val is None or val == "" or val == 0:
+            return 0.0
+        try:
+            return float(str(val).replace(",", ""))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _read_expense_row(self, ws, row_idx: int) -> dict:
+        category = ws.cell(row=row_idx, column=EXPENSE_CAT_COL).value
+        monthly: dict[str, float | None] = {}
+        for mm, col in self._exp_month_cols.items():
+            raw = ws.cell(row=row_idx, column=col).value
+            monthly[mm] = self._safe_float(raw) if raw not in (None, "", 0) else None
+
+        total = self._safe_float(ws.cell(row=row_idx, column=EXPENSE_TOTAL_COL).value)
+        avg   = self._safe_float(ws.cell(row=row_idx, column=EXPENSE_AVG_COL).value)
+        actuals = [v for v in monthly.values() if v is not None and v > 0]
+        return {
+            "category":     str(category).strip() if category else "",
+            "monthly":      monthly,
+            "total":        total,          # col O – הוצאות 2026 · עמודה O (סה"כ שנתי)
+            "avg":          avg,            # col N – הוצאות 2026 · עמודה N
+            "min":          min(actuals) if actuals else 0.0,
+            "max":          max(actuals) if actuals else 0.0,
+            "months_count": len(actuals),
+            "row":          row_idx,
+        }
+
+    def __init__(self, ledger_path: str):
+        self.path = Path(ledger_path)
+        wb = openpyxl.load_workbook(str(ledger_path), data_only=True)
+
+        # ── Expense sheet ────────────────────────────────────────────────────
+        if EXPENSE_SHEET_NAME not in wb.sheetnames:
+            wb.close()
+            raise ValueError(f"Sheet '{EXPENSE_SHEET_NAME}' not found")
+        ws_exp = wb[EXPENSE_SHEET_NAME]
+
+        # Month-column mapping (skip avg col N and annual-total col O)
+        self._exp_month_cols: dict[str, int] = {}
+        for cell in ws_exp[EXPENSE_HEADER_ROW]:
+            if cell.column in (EXPENSE_TOTAL_COL, EXPENSE_AVG_COL, EXPENSE_CAT_COL):
+                continue
+            mm = _month_to_mm(cell.value)
+            if mm:
+                self._exp_month_cols[mm] = cell.column
+
+        # Fixed cost rows 2–12
+        self.fixed_rows: list[dict] = []
+        for row_idx in EXPENSE_FIXED_ROWS:
+            rd = self._read_expense_row(ws_exp, row_idx)
+            if rd["category"]:
+                self.fixed_rows.append(rd)
+
+        # כללי row 13
+        self.kelali = self._read_expense_row(ws_exp, EXPENSE_KELALI_ROW)
+
+        # Read-only summary rows (formulas, data_only=True gives computed values)
+        self.row_total_operating = self._safe_float(   # row 16 col O
+            ws_exp.cell(row=EXPENSE_TOTAL_OPERATING_ROW, column=EXPENSE_TOTAL_COL).value
+        )
+        self.row_petty_total = self._safe_float(       # row 17 col O
+            ws_exp.cell(row=EXPENSE_PETTY_TOTAL_ROW, column=EXPENSE_TOTAL_COL).value
+        )
+
+        # Comment row 23 per month
+        self.kelali_comments: dict[str, str] = {}
+        for mm, col in self._exp_month_cols.items():
+            v = ws_exp.cell(row=EXPENSE_COMMENT_ROW_DASH, column=col).value
+            if v:
+                self.kelali_comments[mm] = str(v).strip()
+
+        # ── גביה 2026 – monthly payments + column Q petty cash ───────────────
+        if SHEET_NAME not in wb.sheetnames:
+            wb.close()
+            raise ValueError(f"Sheet '{SHEET_NAME}' not found")
+        ws_ledger = wb[SHEET_NAME]
+
+        ledger_month_cols: dict[str, int] = {}
+        for cell in ws_ledger[HEADER_ROW]:
+            mm = _month_to_mm(cell.value)
+            if mm:
+                ledger_month_cols[mm] = cell.column
+
+        # apt → ₪ collected in column Q (PETTY_CASH_COL = 17)
+        self.petty_collected: dict[int, float] = {}
+        # apt → mm → ₪ paid
+        self.payment_grid: dict[int, dict[str, float]] = {}
+
+        for row_idx in range(FIRST_DATA_ROW, LAST_DATA_ROW + 1):
+            apt_val = ws_ledger.cell(row=row_idx, column=APT_COL).value
+            try:
+                apt = int(apt_val)
+            except (TypeError, ValueError):
+                continue
+
+            petty_val = ws_ledger.cell(row=row_idx, column=PETTY_CASH_COL).value
+            self.petty_collected[apt] = self._safe_float(petty_val)
+
+            self.payment_grid[apt] = {}
+            for mm, col in ledger_month_cols.items():
+                v = ws_ledger.cell(row=row_idx, column=col).value
+                self.payment_grid[apt][mm] = self._safe_float(v)
+
+        # ── קופה קטנה tab – projects spent this year ─────────────────────────
+        self.petty_spent_projects: list[dict] = []
+        if PETTY_CASH_SHEET in wb.sheetnames:
+            ws_petty = wb[PETTY_CASH_SHEET]
+            for row_idx in PETTY_SPENT_ROWS:
+                name = ws_petty.cell(row=row_idx, column=1).value
+                if not name:
+                    continue
+                total_spent = 0.0
+                for col_idx in range(2, 14):  # columns B–M
+                    total_spent += self._safe_float(
+                        ws_petty.cell(row=row_idx, column=col_idx).value
+                    )
+                self.petty_spent_projects.append({
+                    "name":   str(name).strip(),
+                    "total":  total_spent,
+                    "source": f"קופה קטנה · שורה {row_idx}",
+                })
+
+        wb.close()
+        self._compute()
+
+    def _compute(self):
+        """Pre-compute all derived metrics once."""
+
+        # ── Bucket 1: Fixed costs ─────────────────────────────────────────
+        self.fixed_ytd         = sum(r["total"] for r in self.fixed_rows)
+        self.fixed_avg_monthly = sum(r["avg"]   for r in self.fixed_rows)
+        self.fixed_min_monthly = sum(r["min"]   for r in self.fixed_rows)
+        self.fixed_max_monthly = sum(r["max"]   for r in self.fixed_rows)
+        self.fixed_proj_annual = self.fixed_avg_monthly * 12
+        self.fixed_proj_min    = self.fixed_min_monthly * 12
+        self.fixed_proj_max    = self.fixed_max_monthly * 12
+
+        # Months that have any expense entry (to gauge average confidence)
+        months_seen: set[str] = set()
+        for row in self.fixed_rows:
+            for mm, v in row["monthly"].items():
+                if v is not None and v > 0:
+                    months_seen.add(mm)
+        self.months_with_data = len(months_seen)
+
+        # ── Income potential & YTD collected ─────────────────────────────
+        # Source: tenants.csv constant + גביה 2026 all month columns
+        self.annual_income_potential = PAYING_APTS * MONTHLY_FEE * 12  # ₪235,200
+        self.ytd_collected = sum(
+            sum(months.values()) for months in self.payment_grid.values()
+        )
+
+        # ── Coverage ratio: avg monthly income ÷ avg monthly fixed costs ──
+        months_elapsed = max(self.months_with_data, 1)
+        self.avg_monthly_collected = self.ytd_collected / months_elapsed
+        self.coverage_ratio = (
+            self.avg_monthly_collected / self.fixed_avg_monthly
+            if self.fixed_avg_monthly > 0 else 0.0
+        )
+
+        # ── Bucket 2: Variable maintenance pool ───────────────────────────
+        # Source: annual_income_potential – projected fixed annual – כללי YTD
+        self.kelali_ytd  = self.kelali["total"]
+        self.kelali_avg  = self.kelali["avg"]
+        self.bucket2_remaining = (
+            self.annual_income_potential
+            - self.fixed_proj_annual
+            - self.kelali_ytd
+        )
+        self.bucket2_monthly_rate = self.kelali_ytd / months_elapsed if months_elapsed > 0 else 0.0
+        self.bucket2_months_runway = (
+            self.bucket2_remaining / self.bucket2_monthly_rate
+            if self.bucket2_monthly_rate > 0 else 99.0
+        )
+
+        # ── Bucket 3: Capital fund ────────────────────────────────────────
+        # Collected: גביה 2026, col Q, rows 2–61 (all 60 apartments)
+        # Spent: קופה קטנה tab, rows 3–5
+        self.petty_total_collected = sum(self.petty_collected.values())
+        self.petty_total_spent     = sum(p["total"] for p in self.petty_spent_projects)
+        self.petty_available       = self.petty_total_collected - self.petty_total_spent
+        self.petty_potential       = TOTAL_APTS * PETTY_AMOUNT   # ₪30,000
+        self.petty_collection_pct  = (
+            self.petty_total_collected / self.petty_potential * 100
+            if self.petty_potential > 0 else 0.0
+        )
+        self.petty_apts_paid = sum(
+            1 for v in self.petty_collected.values() if v >= PETTY_AMOUNT
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wishlist manager
+# ══════════════════════════════════════════════════════════════════════════════
+
+_WISH_PLAN_FILL = PatternFill("solid", fgColor="FFF2CC")   # yellow  – planned
+_WISH_WIP_FILL  = PatternFill("solid", fgColor="D6F0D6")   # green   – in progress
+_WISH_DONE_FILL = PatternFill("solid", fgColor="E8E8E8")   # grey    – completed
+
+
+class WishlistManager:
+    """
+    Read and write the capital projects wishlist tab (רשימת פרויקטים).
+
+    Tab is created automatically on first use if missing.
+    Completed items are stored and displayed but NOT deducted from the
+    available balance (they are already captured as actual spend in קופה קטנה).
+    """
+
+    def __init__(self, ledger_path: str):
+        self.path = Path(ledger_path)
+        self._ensure_sheet()
+
+    def _ensure_sheet(self):
+        wb = openpyxl.load_workbook(str(self.path))
+        if WISHLIST_SHEET not in wb.sheetnames:
+            ws = wb.create_sheet(WISHLIST_SHEET)
+            ws.sheet_view.rightToLeft = True
+            for col_idx, header in enumerate(WISHLIST_COLS, 1):
+                cell = ws.cell(row=1, column=col_idx, value=header)
+                cell.font      = _FONT_HEADER
+                cell.fill      = _FILL_HEADER
+                cell.alignment = _ALIGN_HEADER
+            for i, w in enumerate([32, 16, 14, 42], 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+            ws.row_dimensions[1].height = 22
+            ws.freeze_panes = "A2"
+            wb.save(str(self.path))
+            print(f"✓ Created wishlist sheet '{WISHLIST_SHEET}'")
+        wb.close()
+
+    def read(self) -> list[dict]:
+        wb = openpyxl.load_workbook(str(self.path), data_only=True)
+        if WISHLIST_SHEET not in wb.sheetnames:
+            wb.close()
+            return []
+        ws = wb[WISHLIST_SHEET]
+        items = []
+        for row_idx in range(2, (ws.max_row or 1) + 2):
+            name = ws.cell(row=row_idx, column=1).value
+            if not name:
+                continue
+            try:
+                cost = float(ws.cell(row=row_idx, column=2).value or 0)
+            except (TypeError, ValueError):
+                cost = 0.0
+            status_raw = str(ws.cell(row=row_idx, column=3).value or "מתוכנן").strip()
+            status = status_raw if status_raw in WISHLIST_STATUS_OPT else "מתוכנן"
+            notes  = str(ws.cell(row=row_idx, column=4).value or "").strip()
+            items.append({
+                "name":   str(name).strip(),
+                "cost":   cost,
+                "status": status,
+                "notes":  notes,
+                "row":    row_idx,
+            })
+        wb.close()
+        return items
+
+    def save(self, items: list[dict]) -> None:
+        wb = openpyxl.load_workbook(str(self.path))
+        if WISHLIST_SHEET not in wb.sheetnames:
+            wb.close()
+            self._ensure_sheet()
+            wb = openpyxl.load_workbook(str(self.path))
+        ws = wb[WISHLIST_SHEET]
+
+        fill_map = {
+            "מתוכנן": _WISH_PLAN_FILL,
+            "בביצוע": _WISH_WIP_FILL,
+            "הושלם":  _WISH_DONE_FILL,
+        }
+
+        # Clear all old data rows first
+        max_r = max(ws.max_row or 1, len(items) + 1)
+        for row_idx in range(2, max_r + 2):
+            for col_idx in range(1, 5):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.value = None
+                cell.fill  = PatternFill()
+
+        # Write items with colour coding
+        for i, item in enumerate(items, 2):
+            fill = fill_map.get(item.get("status", "מתוכנן"), _WISH_PLAN_FILL)
+            vals = [
+                item.get("name", ""),
+                item.get("cost", 0.0),
+                item.get("status", "מתוכנן"),
+                item.get("notes", ""),
+            ]
+            for col_idx, val in enumerate(vals, 1):
+                cell           = ws.cell(row=i, column=col_idx, value=val)
+                cell.fill      = fill
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                cell.font      = Font(size=10)
+
+        wb.save(str(self.path))
+        print(f"✓ Wishlist saved: {len(items)} projects → {WISHLIST_SHEET}")
