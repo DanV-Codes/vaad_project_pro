@@ -404,7 +404,7 @@ with tab3:
                     if st.button(_plbl, key=f"p_{idx}_petty",
                                  type="primary" if _is_psel else "secondary",
                                  use_container_width=True):
-                        st.session_state[f"petty"] = "petty"
+                        st.session_state[f"target_{idx}"] = "petty"
                         st.rerun()
 
                     st.divider()

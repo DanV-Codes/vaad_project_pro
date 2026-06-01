@@ -674,11 +674,16 @@ class LedgerDashboardReader:
         monthly: dict[str, float | None] = {}
         for mm, col in self._exp_month_cols.items():
             raw = ws.cell(row=row_idx, column=col).value
-            monthly[mm] = self._safe_float(raw) if raw not in (None, "", 0) else None
+            monthly[mm] = self._safe_float(raw) if raw not in (None, "") else None
 
-        total = self._safe_float(ws.cell(row=row_idx, column=EXPENSE_TOTAL_COL).value)
-        avg   = self._safe_float(ws.cell(row=row_idx, column=EXPENSE_AVG_COL).value)
-        actuals = [v for v in monthly.values() if v is not None and v > 0]
+        actuals = [v for v in monthly.values() if v is not None]
+        
+        calc_total = sum(actuals)
+        calc_avg   = (calc_total / len(actuals)) if actuals else 0.0
+        
+        total = self._safe_float(ws.cell(row=row_idx, column=EXPENSE_TOTAL_COL).value) or calc_total
+        avg   = self._safe_float(ws.cell(row=row_idx, column=EXPENSE_AVG_COL).value) or calc_avg
+
         return {
             "category":     str(category).strip() if category else "",
             "monthly":      monthly,

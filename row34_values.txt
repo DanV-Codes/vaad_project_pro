@@ -1,0 +1,1 @@
+[[4361.79, 4361.79, 4549.48, 4558.28, 4575.84, None, None, None, None, None, None, None], [3545.6, 3595.06, 3233.77, 3353.66, 2573.17, None, None, None, None, None, None, None]]

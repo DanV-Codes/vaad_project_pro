@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>סיכום מאי 2026</title>
+    <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@700&display=swap" rel="stylesheet">
+    <style>
+        * { font-weight: 700; box-sizing: border-box; }
+        body {
+            font-family: 'Heebo', sans-serif;
+            background-color: #F8FAFC;
+            color: #1E293B;
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            justify-content: center;
+        }
+        .dashboard {
+            width: 1200px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+        .header {
+            text-align: center;
+            font-size: 36px;
+            margin-bottom: 20px;
+        }
+        .row {
+            display: flex;
+            gap: 24px;
+        }
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .card-title {
+            font-size: 20px;
+            color: #000;
+            margin-bottom: 16px;
+            text-align: right;
+        }
+        .card-value {
+            font-size: 46px;
+            color: #334155;
+            text-align: center;
+            margin: 10px 0;
+            display: flex;
+            justify-content: center;
+            align-items: baseline;
+            gap: 8px;
+        }
+        .currency {
+            font-size: 32px;
+        }
+        .sub-text {
+            font-size: 15px;
+            color: #475569;
+            text-align: center;
+            line-height: 1.4;
+        }
+        .split-expenses {
+            font-size: 14px;
+            color: #475569;
+            text-align: center;
+            margin-top: 5px;
+        }
+        
+        /* Progress Bar */
+        .progress-bg {
+            background: #E2E8F0;
+            height: 12px;
+            border-radius: 6px;
+            width: 100%;
+            margin-top: 15px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            background: #64748B;
+            height: 100%;
+            border-radius: 6px;
+        }
+        
+        /* Bar Chart */
+        .chart-container {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-around;
+            height: 250px;
+            margin-top: 30px;
+            position: relative;
+            padding-bottom: 0px; 
+            margin-bottom: 30px; /* space for x-labels */
+        }
+        .grid-lines {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            z-index: 0;
+        }
+        .grid-line {
+            border-bottom: 1px solid #E2E8F0;
+            width: 100%;
+            position: relative;
+        }
+        /* Base zero line */
+        .grid-line-0 {
+            border-bottom: 2px solid #CBD5E1;
+        }
+        .bar-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            z-index: 1;
+            height: 100%;
+            justify-content: flex-end;
+            width: 50px;
+            position: relative;
+        }
+        .bar-label {
+            position: absolute;
+            bottom: -35px;
+            font-size: 16px;
+            color: #1E293B;
+            white-space: nowrap;
+        }
+        .bar-value {
+            font-size: 16px;
+            margin-bottom: 8px;
+            color: #1E293B;
+        }
+        .bar {
+            width: 50px;
+            border-radius: 6px 6px 0 0;
+        }
+        
+        /* Treemap / Mosaic */
+        .mosaic-container {
+            display: flex;
+            height: 300px;
+            gap: 4px;
+            border-radius: 12px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .mosaic-col {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            height: 100%;
+        }
+        .mosaic-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #1E293B;
+            padding: 10px;
+            text-align: center;
+            gap: 6px;
+        }
+        .box-title { 
+            font-size: 18px; 
+            line-height: 1.1;
+        }
+        .box-val { 
+            font-size: 16px; 
+            line-height: 1.1;
+        }
+    </style>
+</head>
+<body>
+
+<div class="dashboard">
+    <div class="header">האגמית 7 סיכום מאי 2026</div>
+    
+    <div class="row">
+        <div class="card">
+            <div class="card-title">יתרה בבנק</div>
+            <div class="card-value">31,621 <span class="currency">₪</span></div>
+            <div class="sub-text" style="margin-top: 15px;">נכון לסוף מאי 2026</div>
+        </div>
+        
+        <div class="card">
+            <div class="card-title" style="text-align: center;">הוצאות</div>
+            <div class="card-value">17,643 <span class="currency">₪</span></div>
+            <div class="split-expenses">
+                שוטף: 16,771 ₪ <br>
+                כללי: 872 ₪ <span style="font-size:12px;">(נסחי טאבו | טלויזיה ללובי)</span>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-title">הכנסות</div>
+            <div class="card-value">18,200 <span class="currency">₪</span></div>
+            <div class="progress-bg">
+                <div class="progress-fill" style="width: 92.85714285714286%;"></div>
+            </div>
+            <div class="sub-text" style="margin-top: 12px;">92.9% מתוך יעד של 19,600 ₪</div>
+        </div>
+    </div>
+    
+    <div class="row">
+        <div class="card" style="flex: 1;">
+            <div class="card-title" style="text-align: center;">אחוזי גביה מתחילת השנה<br><span style="font-size: 14px; color: #64748B;">גרף התקדמות</span></div>
+            
+            <div class="chart-container">
+                <div class="grid-lines">
+                    <div class="grid-line" style="flex: 1;"></div>
+                    <div class="grid-line" style="flex: 1;"></div>
+                    <div class="grid-line" style="flex: 1;"></div>
+                    <div class="grid-line" style="flex: 1;"></div>
+                    <div class="grid-line grid-line-0" style="height: 0;"></div>
+                </div>
+                
+                <div class="bar-wrapper">
+                    <div class="bar-value">99.8%</div>
+                    <div class="bar" style="height: 99.84693877551021%; background-color: #10B981;"></div>
+                    <div class="bar-label">ינואר</div>
+                </div>
+                <div class="bar-wrapper">
+                    <div class="bar-value">100.0%</div>
+                    <div class="bar" style="height: 100%; background-color: #10B981;"></div>
+                    <div class="bar-label">פברואר</div>
+                </div>
+                <div class="bar-wrapper">
+                    <div class="bar-value">100.0%</div>
+                    <div class="bar" style="height: 100%; background-color: #10B981;"></div>
+                    <div class="bar-label">מרץ</div>
+                </div>
+                <div class="bar-wrapper">
+                    <div class="bar-value">100.0%</div>
+                    <div class="bar" style="height: 100%; background-color: #10B981;"></div>
+                    <div class="bar-label">אפריל</div>
+                </div>
+                <div class="bar-wrapper">
+                    <div class="bar-value">92.9%</div>
+                    <div class="bar" style="height: 92.85714285714286%; background-color: #FCD34D;"></div>
+                    <div class="bar-label">מאי</div>
+                </div>
+                <div class="bar-wrapper">
+                    <div class="bar-value">76.8%</div>
+                    <div class="bar" style="height: 76.83333333333333%; background-color: #EF4444;"></div>
+                    <div class="bar-label">קופה קטנה</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card" style="flex: 1.2;">
+            <div class="card-title" style="text-align: center;">פילוג הוצאות מרכזיות</div>
+            <div class="mosaic-container">
+<div class="mosaic-col" style="width: 42.50965677703118%;"><div style="height: 100.0%;"><div class="mosaic-box" style="height: 100%; background-color: #818CF8;"><div class="box-title">יניב אחזקות</div><div class="box-val">(₪ 7,500)</div></div></div></div><div class="mosaic-col" style="width: 40.52026151940849%;"><div style="height: 64.00662469348903%;"><div class="mosaic-box" style="height: 100%; background-color: #A5B4FC;"><div class="box-title">קונה מעליות</div><div class="box-val">(₪ 4,576)</div></div></div><div style="height: 35.99337530651097%;"><div class="mosaic-box" style="height: 100%; background-color: #93C5FD;"><div class="box-title">חשמל ציבורי</div><div class="box-val">(₪ 2,573)</div></div></div></div><div class="mosaic-col" style="width: 15%;"><div style="height: 52.254641909814325%;"><div class="mosaic-box" style="height: 100%; background-color: #BAE6FD;"><div class="box-title">ביטוח</div><div class="box-val">(₪ 985)</div></div></div><div style="height: 47.745358090185675%;"><div class="mosaic-box" style="height: 100%; background-color: #E0F2FE;"><div class="box-title">גינון</div><div class="box-val">(₪ 900)</div></div></div></div><div class="mosaic-col" style="width: 15%;"><div style="height: 100.0%;"><div class="mosaic-box" style="height: 100%; background-color: #F1F5F9;"><div class="box-title">שאר ההוצאות</div><div class="box-val">(₪ 1,109)</div></div></div></div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

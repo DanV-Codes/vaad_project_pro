@@ -1,0 +1,1 @@
+[('=SUM(Table2[[#This Row],[ינואר 25]:[דצמבר 25]])', '=AVERAGE(Table2[[#This Row],[ינואר 25]:[דצמבר 25]])'), ('=SUM(Table2[[#This Row],[ינואר 25]:[דצמבר 25]])', '=AVERAGE(Table2[[#This Row],[ינואר 25]:[דצמבר 25]])'), ('=SUM(Table2[[#This Row],[ינואר 25]:[דצמבר 25]])', '=AVERAGE(Table2[[#This Row],[ינואר 25]:[דצמבר 25]])')]
